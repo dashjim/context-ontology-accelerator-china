@@ -23,6 +23,7 @@ import {
   resolveContext,
   resolveLambdaReservedConcurrency,
 } from "../../context";
+import { imageBuildArgs } from "../../utils/deployment-switches";
 import { NetworkStack } from "../foundation/network-stack";
 
 export interface VkgStackProps extends cdk.StackProps {
@@ -158,6 +159,7 @@ export class VkgStack extends SCLStack {
     } else {
       containerImage = ecs.ContainerImage.fromAsset("../packages/vkg", {
         platform: cdk.aws_ecr_assets.Platform.LINUX_ARM64,
+        buildArgs: imageBuildArgs(this),
       });
     }
 
@@ -205,8 +207,8 @@ export class VkgStack extends SCLStack {
           "logs:PutLogEvents",
         ],
         resources: [
-          `arn:aws:logs:${this.region}:${this.account}:log-group:/ecs/vkg-*`,
-          `arn:aws:logs:${this.region}:${this.account}:log-group:/ecs/vkg-*:*`,
+          `arn:${this.partition}:logs:${this.region}:${this.account}:log-group:/ecs/vkg-*`,
+          `arn:${this.partition}:logs:${this.region}:${this.account}:log-group:/ecs/vkg-*:*`,
         ],
       }),
     );
@@ -281,7 +283,7 @@ export class VkgStack extends SCLStack {
           "ecs:CreateService",
         ],
         resources: [
-          `arn:aws:ecs:${this.region}:${this.account}:service/${this.cluster.clusterName}/*`,
+          `arn:${this.partition}:ecs:${this.region}:${this.account}:service/${this.cluster.clusterName}/*`,
         ],
       }),
     );
@@ -329,7 +331,7 @@ export class VkgStack extends SCLStack {
           "application-autoscaling:PutScalingPolicy",
         ],
         resources: [
-          `arn:aws:application-autoscaling:${this.region}:${this.account}:scalable-target/*`,
+          `arn:${this.partition}:application-autoscaling:${this.region}:${this.account}:scalable-target/*`,
         ],
       }),
     );
@@ -341,8 +343,8 @@ export class VkgStack extends SCLStack {
           "logs:PutLogEvents",
         ],
         resources: [
-          `arn:aws:logs:${this.region}:${this.account}:log-group:/ecs/vkg-*`,
-          `arn:aws:logs:${this.region}:${this.account}:log-group:/ecs/vkg-*:*`,
+          `arn:${this.partition}:logs:${this.region}:${this.account}:log-group:/ecs/vkg-*`,
+          `arn:${this.partition}:logs:${this.region}:${this.account}:log-group:/ecs/vkg-*:*`,
         ],
       }),
     );

@@ -38,7 +38,9 @@ IMAGE_TAG="${IMAGE_TAG:-$(git -C "${REPO_ROOT}" rev-parse --short HEAD 2>/dev/nu
 # ECR image to the same region CDK will deploy the stack into.
 REGION="${CDK_DEFAULT_REGION:-${AWS_DEFAULT_REGION:-${AWS_REGION:-$(aws configure get region 2>/dev/null || echo us-east-1)}}}"
 ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
-ECR_URI="${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/${ECR_REPO}"
+# China regions serve endpoints under amazonaws.com.cn.
+case "$REGION" in cn-*) DNS_SUFFIX="amazonaws.com.cn" ;; *) DNS_SUFFIX="amazonaws.com" ;; esac
+ECR_URI="${ACCOUNT}.dkr.ecr.${REGION}.${DNS_SUFFIX}/${ECR_REPO}"
 IMAGE_FULL="${ECR_URI}:${IMAGE_TAG}"
 
 echo "=== Deploying Serve Layer (Context Manager) ==="
@@ -60,7 +62,7 @@ if [ "${SKIP_BUILD:-}" != "1" ]; then
 
   # Login to ECR
   aws ecr get-login-password --region "${REGION}" | \
-    docker login --username AWS --password-stdin "${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com"
+    docker login --username AWS --password-stdin "${ACCOUNT}.dkr.ecr.${REGION}.${DNS_SUFFIX}"
 
   # Ensure buildx builder with arm64 support
   BINFMT_TAG="qemu-v8.1.5"
@@ -166,7 +168,7 @@ if [ -n "${RUNTIME_ARN}" ] && [ "${RUNTIME_ARN}" != "None" ]; then
   # printed exactly that command, which cannot work.
   echo "Invoke with a bearer ID token from the app's IdP:"
   echo "  curl -X POST \\"
-  echo "    'https://bedrock-agentcore.${REGION}.amazonaws.com/runtimes/${RUNTIME_ID}/invocations?qualifier=DEFAULT' \\"
+  echo "    'https://bedrock-agentcore.${REGION}.${DNS_SUFFIX}/runtimes/${RUNTIME_ID}/invocations?qualifier=DEFAULT' \\"
   echo "    -H \"Authorization: Bearer \${ID_TOKEN}\" \\"
   echo "    -H 'Content-Type: application/json' \\"
   echo "    -d '{\"query\":\"...\",\"namespace\":\"...\"}'"

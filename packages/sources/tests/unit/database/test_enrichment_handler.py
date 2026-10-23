@@ -755,3 +755,20 @@ class TestEnrichmentProgressPublishing:
         handler()
 
         assert callable(mock_run.call_args[1]["progress"])
+
+
+class TestMetadataStoreDomainId:
+    @patch(
+        f"{ENRICHER_MODULE}.run", return_value={"tables_enriched": 1, "tables_failed": 0, "tables_skipped_unchanged": 0}
+    )
+    @patch("coa_common.dao.DynamoDBDAO")
+    def test_dynamodb_backend_runs_without_smus_domain_id(self, mock_dao_cls, mock_run, monkeypatch):
+        monkeypatch.setenv("METADATA_STORE_BACKEND", "dynamodb")
+        monkeypatch.delenv("SMUS_DOMAIN_ID")
+        mock_dao_cls.return_value = _build_dao(source_item={"sourceId": "ds-123"})
+
+        from coa_sources.database.pipeline.enrichment_handler import handler
+
+        handler()
+
+        assert mock_run.call_args[1]["domain_id"] == ""

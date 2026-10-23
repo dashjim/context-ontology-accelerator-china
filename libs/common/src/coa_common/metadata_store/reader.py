@@ -1,7 +1,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Reads discovered assets from DataZone for enrichment using SMUSClient."""
+"""Reads discovered assets from the metadata store (DataZone or DynamoDB) for enrichment."""
 
 from __future__ import annotations
 
@@ -14,7 +14,8 @@ from coa_common.datazone_forms import (
     deserialize_form,
 )
 from coa_common.domain_models import Table
-from coa_common.metadata_store.smus import SMUSClient
+from coa_common.metadata_store.base import MetadataStoreClient
+from coa_common.metadata_store.factory import build_metadata_store_client
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,7 @@ def read_assets_for_datasource(domain_id: str, project_id: str, data_source_id: 
     # Assets are stored with DS# prefix in their name
     ds_key = f"DS#{data_source_id}" if not data_source_id.startswith("DS#") else data_source_id
 
-    client = SMUSClient(
+    client = build_metadata_store_client(
         domain_id=domain_id,
         region_name=AWS_REGION,
         assume_role_arn=os.getenv("PROJECT_ACCESS_ROLE_ARN") or None,
@@ -78,9 +79,9 @@ def read_assets_for_datasource(domain_id: str, project_id: str, data_source_id: 
     return tables
 
 
-def _client(domain_id: str, session_name: str) -> SMUSClient:
-    """SMUSClient for a DataZone domain, with the project-access role when set."""
-    return SMUSClient(
+def _client(domain_id: str, session_name: str) -> MetadataStoreClient:
+    """Metadata store client for a domain, with the project-access role when set."""
+    return build_metadata_store_client(
         domain_id=domain_id,
         region_name=AWS_REGION,
         assume_role_arn=os.getenv("PROJECT_ACCESS_ROLE_ARN") or None,
@@ -174,7 +175,7 @@ def read_table_for_asset(domain_id: str, asset_id: str, asset_name: str, data_so
 
 
 def _parse_asset(
-    client: SMUSClient,
+    client: MetadataStoreClient,
     asset_id: str,
     asset_name: str,
     data_source_id: str,

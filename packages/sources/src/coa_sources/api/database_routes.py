@@ -34,7 +34,12 @@ import structlog
 from botocore.exceptions import ClientError
 from coa_common.dao import QueryParams
 from coa_common.domain_models import Table
-from coa_common.metadata_store import AssetResult, SMUSClient
+from coa_common.metadata_store import (
+    AssetResult,
+    MetadataStoreClient,
+    build_metadata_store_client,
+    missing_metadata_store_config,
+)
 from coa_common.response import api_response, iso_to_epoch
 from coa_common.s3 import get_s3_client, read_file_bytes, upload_json
 from coa_control_plane_server.models.custom_connector_configuration import CustomConnectorConfiguration
@@ -66,6 +71,7 @@ from coa_sources.database.databricks import (
     config_parameter_name,
     delete_config_parameter,
     deployment_id,
+    deployment_partition,
     normalise_arn,
     reserved_role_name_prefix,
     resolve_connector_function_arn,
@@ -108,8 +114,8 @@ logger = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _get_smus_client() -> SMUSClient:
-    return SMUSClient(
+def _get_smus_client() -> MetadataStoreClient:
+    return build_metadata_store_client(
         domain_id=_SMUS_DOMAIN_ID,
         region_name=_AWS_REGION,
         assume_role_arn=_PROJECT_ACCESS_ROLE_ARN or None,
@@ -431,9 +437,9 @@ def _validate_databricks_configuration(
             {
                 "error": (
                     "databricksSqlWarehouseConfiguration.crossAccountRoleArn is not a shape this "
-                    "deployment can assume. The partition must be 'aws': this deployment's "
-                    "sts:AssumeRole grant is written arn:aws:iam::*:role/..., so an aws-cn or "
-                    "aws-us-gov role would register and then have every assume denied by our own "
+                    f"deployment can assume. The partition must be '{deployment_partition()}': "
+                    "this deployment's sts:AssumeRole grant is written in its own partition, so a "
+                    "role in any other partition would register and then have every assume denied by our own "
                     "policy, with a message pointing at your trust policy instead. And the role's "
                     "path and name may contain only letters, digits and +=,.@_/- , because the "
                     "connector re-validates this value on every request — a source registered with "
@@ -1397,8 +1403,8 @@ def _handle_list_tables(event: dict[str, Any], namespace_id: str, source_id: str
     from coa_control_plane_server.models.review_status import ReviewStatus
     from coa_control_plane_server.models.table_summary import TableSummary
 
-    if not _SMUS_DOMAIN_ID:
-        return api_response(500, {"error": "SMUS_DOMAIN_ID not configured"})
+    if missing := missing_metadata_store_config(domain_id=_SMUS_DOMAIN_ID):
+        return api_response(500, {"error": f"{missing} not configured"})
 
     qs = event.get("queryStringParameters") or {}
     review_status_filter = qs.get("reviewStatus")
@@ -1589,8 +1595,8 @@ def _handle_get_table(namespace_id: str, source_id: str, table_id: str) -> dict[
     from coa_control_plane_server.models.review_status import ReviewStatus as RS
     from coa_control_plane_server.models.technical_metadata_output import TechnicalMetadataOutput
 
-    if not _SMUS_DOMAIN_ID:
-        return api_response(500, {"error": "SMUS_DOMAIN_ID not configured"})
+    if missing := missing_metadata_store_config(domain_id=_SMUS_DOMAIN_ID):
+        return api_response(500, {"error": f"{missing} not configured"})
 
     project_id = _resolve_project_id(namespace_id)
     if not project_id:
@@ -1755,10 +1761,10 @@ def _handle_get_table(namespace_id: str, source_id: str, table_id: str) -> dict[
 #     Counter drift is logged but not raised — the DataZone asset is the canon.
 
 
-def _smus_or_500() -> tuple[SMUSClient | None, dict[str, Any] | None]:
-    """Build the SMUS client or return a 500 if domain not configured."""
-    if not _SMUS_DOMAIN_ID:
-        return None, api_response(500, {"error": "SMUS_DOMAIN_ID not configured"})
+def _smus_or_500() -> tuple[MetadataStoreClient | None, dict[str, Any] | None]:
+    """Build the metadata store client or return a 500 if it is not configured."""
+    if missing := missing_metadata_store_config(domain_id=_SMUS_DOMAIN_ID):
+        return None, api_response(500, {"error": f"{missing} not configured"})
     return _get_smus_client(), None
 
 
@@ -1771,7 +1777,7 @@ def _project_or_404(namespace_id: str) -> tuple[str | None, dict[str, Any] | Non
 
 
 def _load_single_asset(
-    client: SMUSClient,
+    client: MetadataStoreClient,
     project_id: str,
     source_id: str,
     table_id: str,
@@ -1797,7 +1803,7 @@ def _load_single_asset(
 
 
 def _load_asset_metadata(
-    client: SMUSClient,
+    client: MetadataStoreClient,
     source_id: str,
     table_id: str,
     asset: AssetResult,
@@ -1826,7 +1832,7 @@ def _load_asset_metadata(
 
 
 def _find_source_table_assets_by_name(
-    client: SMUSClient,
+    client: MetadataStoreClient,
     project_id: str,
     source_id: str,
     table_name: str,
@@ -1870,7 +1876,7 @@ def _find_source_table_assets_by_name(
 
 
 def _resolve_fk_target_table(
-    client: SMUSClient,
+    client: MetadataStoreClient,
     project_id: str,
     target_source_id: str,
     target_source: dict[str, Any],

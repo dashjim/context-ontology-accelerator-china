@@ -10,6 +10,7 @@ import importlib.util
 import inspect
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import jwt as pyjwt
 import pytest
 from coa_serve.config import ServiceConfig
 from coa_serve.models import ConfidenceScore, InvokeRequest, InvokeResponse, QueryResult, TraceStep
@@ -824,6 +825,103 @@ class TestResolveUserIdPriority:
 
         assert result["error"] == "ValidationError"
         assert result["statusCode"] == 400
+
+
+@agentcore_required
+@pytest.mark.asyncio
+class TestConversationHistoryDisabled:
+    """No MEMORY_ID (no AgentCore Memory, e.g. AWS China): sessions, streaming and
+    the session actions keep working; history is empty and turn writes skipped."""
+
+    @pytest.fixture(autouse=True)
+    def stub_env(self, config):
+        import coa_serve.main as main_mod
+        from coa_serve.session import SessionManager
+
+        main_mod._config = config
+
+        async def mock_resolve(request, trace=None, on_token=None, conversation_history=None, deadline=None):
+            self.histories.append(conversation_history)
+            return InvokeResponse(
+                result=QueryResult(
+                    tier=2,
+                    confidence=ConfidenceScore(score=0.85, rationale="high"),
+                    trace=[TraceStep(step="t2.sql", status="done", durationMs=50)],
+                    synthesized_answer="answer",
+                ),
+                requestId="req-1",
+            )
+
+        self.histories: list = []
+        mock_orch = MagicMock()
+        mock_orch.resolve = mock_resolve
+        main_mod._orchestrator = mock_orch
+
+        with patch("coa_serve.session.MemorySessionManager") as MockMSM:
+            main_mod._session_manager = SessionManager(memory_id="", region="cn-north-1")
+            self.memory_cls = MockMSM
+
+        record = MagicMock(session_id="sess-new", title="t")
+        metadata = MagicMock()
+        metadata.create = AsyncMock(return_value=record)
+        metadata.validate_ownership = AsyncMock(return_value=True)
+        metadata.update_activity = AsyncMock()
+        metadata.get_recent_for_namespace = AsyncMock(return_value=record)
+        metadata.get_session_namespace = AsyncMock(return_value="demo")
+        main_mod._session_metadata = metadata
+        self.metadata = metadata
+
+        token = pyjwt.encode({"sub": "user-1", "email": "u@x.com"}, "s", algorithm="HS256")
+        self.ctx = MagicMock()
+        self.ctx.request_headers = {"authorization": f"Bearer {token}"}
+
+        with patch("coa_serve.main.resolve_profile", return_value=MagicMock()):
+            yield
+
+    @patch("coa_serve.main._ensure_initialized")
+    async def test_multi_turn_streaming_uses_ddb_session_and_empty_history(self, mock_init):
+        mock_init.return_value = None
+
+        first = await _invoke_collect({"query": "q1", "namespace": "demo", "stream": True}, context=self.ctx)
+        second = await _invoke_collect(
+            {"query": "q2", "namespace": "demo", "stream": True, "sessionId": "sess-new"}, context=self.ctx
+        )
+
+        for events in (first, second):
+            # A single event comes back bare (see _invoke_collect).
+            events = events if isinstance(events, list) else [events]
+            done = [e for e in events if e.get("type") == "done"]
+            assert len(done) == 1
+            assert done[0]["sessionId"] == "sess-new"
+        # The session is still created in (and resumed from) DynamoDB.
+        self.metadata.create.assert_awaited_once()
+        self.metadata.validate_ownership.assert_awaited_once_with("user-1", "sess-new")
+        assert self.metadata.update_activity.await_count == 2
+        # No prior turns reach the orchestrator, and Memory is never touched.
+        assert self.histories == [[], []]
+        self.memory_cls.return_value.create_memory_session.assert_not_called()
+
+    @patch("coa_serve.main._ensure_initialized")
+    async def test_get_session_history_is_empty_not_an_error(self, mock_init):
+        mock_init.return_value = None
+
+        result = await _invoke_collect({"action": "getSessionHistory", "sessionId": "sess-new"}, context=self.ctx)
+
+        assert result["statusCode"] == 200
+        assert result["messages"] == []
+        assert result["hasMore"] is False
+        assert result["cursor"] is None
+
+    @patch("coa_serve.main._ensure_initialized")
+    async def test_get_recent_session_restores_session_without_messages(self, mock_init):
+        mock_init.return_value = None
+
+        result = await _invoke_collect({"action": "getRecentSession", "namespace": "demo"}, context=self.ctx)
+
+        assert result["statusCode"] == 200
+        assert result["sessionId"] == "sess-new"
+        assert result["messages"] == []
+        assert result["totalCount"] == 0
 
 
 @pytest.mark.unit

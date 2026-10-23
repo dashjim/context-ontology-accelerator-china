@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 from coa_common.auth.token_authorizer import TokenAuthorizer
+from coa_common.config import aws_dns_suffix
 
 
 class CognitoTokenAuthorizer(TokenAuthorizer):
@@ -39,7 +40,7 @@ class CognitoTokenAuthorizer(TokenAuthorizer):
             region: AWS region where the user pool is deployed.
             client_id: Optional app client ID for audience validation.
         """
-        issuer = f"https://cognito-idp.{region}.amazonaws.com/{user_pool_id}"
+        issuer = f"https://cognito-idp.{region}.{aws_dns_suffix(region)}/{user_pool_id}"
         jwks_uri = f"{issuer}/.well-known/jwks.json"
         super().__init__(issuer=issuer, audience=client_id, jwks_uri=jwks_uri)
 

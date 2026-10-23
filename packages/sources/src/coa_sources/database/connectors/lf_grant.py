@@ -76,9 +76,10 @@ def _caller_role_arn() -> str | None:
     parts = arn.split(":")
     if len(parts) < 6 or "assumed-role/" not in parts[5]:
         return arn or None
+    partition = parts[1]
     account = parts[4]
     role_name = parts[5].split("/")[1]
-    return f"arn:aws:iam::{account}:role/{role_name}"
+    return f"arn:{partition}:iam::{account}:role/{role_name}"
 
 
 def _lf_client_via_grantor(region: str):

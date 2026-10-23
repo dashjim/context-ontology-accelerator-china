@@ -416,16 +416,15 @@ class TestRoleArnMustMatchTheConnectorsOwnPattern:
     @pytest.mark.parametrize(
         ("partition", "expected"),
         [
-            # The shared Smithy `IamRoleArn` names `aws` and `aws-us-gov`, so GovCloud is the
-            # partition that reaches this check, and the one the pinned pattern closes. China
-            # is refused a step earlier, by a generated message that prints the regex.
+            # The shared Smithy `IamRoleArn` names `aws`, `aws-cn` and `aws-us-gov`, so both
+            # reach this check, and the pattern pinned to the deployment's partition closes them.
             ("aws-us-gov", "partition"),
-            ("aws-cn", "crossAccountRoleArn"),
+            ("aws-cn", "partition"),
         ],
     )
     def test_a_role_outside_the_commercial_partition_is_refused_at_submit(self, harness, partition, expected):
-        """This deployment's assume grant is written ``arn:aws:iam::*:role/…``, so a role in
-        another partition would register and then have every assume denied by our own policy
+        """This (commercial) deployment's assume grant is written ``arn:aws:iam::*:role/…``, so a
+        role in another partition would register and then have every assume denied by our own policy
         — with an AccessDenied whose message sends the customer to a trust policy that is
         already correct.
 

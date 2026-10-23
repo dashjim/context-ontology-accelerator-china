@@ -15,6 +15,13 @@ import {
   type TransitGatewayConfig,
   type PrivateLinkConfig,
 } from "../../constructs/jdbc-connectivity";
+import {
+  interfaceEndpointService,
+  isChinaRegion,
+  resolveMetadataStoreBackend,
+  resolveVectorStore,
+  usesInRegionBedrock,
+} from "../../utils/deployment-switches";
 
 /**
  * Foundation stack: VPC, subnets, security groups, VPC endpoints, and
@@ -63,10 +70,17 @@ export class NetworkStack extends SCLStack {
   /** Port-80 egress used only by direct Snowflake discovery for OCSP. */
   public readonly discoveryOcspSecurityGroup: ec2.SecurityGroup;
 
-  /** Security group for the AOSS VPC endpoint (port 443). */
+  /**
+   * Security group for the AOSS VPC endpoint (port 443), or for the managed
+   * OpenSearch domain itself when `vector_store=opensearch`.
+   */
   public readonly aossSecurityGroup: ec2.SecurityGroup;
-  /** EC2 Interface VPC Endpoint ID for AOSS (NextGen *.on.aws private DNS). */
-  public readonly aossVpcEndpointId: string;
+  /**
+   * EC2 Interface VPC Endpoint ID for AOSS (NextGen *.on.aws private DNS).
+   * Unset for an imported VPC or `vector_store=opensearch` (the domain lives in
+   * the VPC and needs no endpoint).
+   */
+  public readonly aossVpcEndpointId?: string;
 
   /** Shared Cloud Map private DNS namespace for service discovery. */
   public readonly serviceNamespace: servicediscovery.PrivateDnsNamespace;
@@ -121,6 +135,9 @@ export class NetworkStack extends SCLStack {
     // ── VPC Endpoints ────────────────────────────────────────────────
     // Only created for new VPCs. Imported VPCs are expected to have
     // their own endpoints managed externally.
+    // vector_store=opensearch puts a managed domain in the VPC: no AOSS
+    // endpoints, and the AOSS endpoint SG below is attached to the domain.
+    const aoss = resolveVectorStore(this) === "aoss";
     if (!existingVpcId) {
       const createdVpc = this.vpc as ec2.Vpc;
 
@@ -133,99 +150,177 @@ export class NetworkStack extends SCLStack {
       });
 
       // Interface endpoints
-      createdVpc.addInterfaceEndpoint("BedrockRuntimeEndpoint", {
-        service: ec2.InterfaceVpcEndpointAwsService.BEDROCK_RUNTIME,
-        privateDnsEnabled: true,
-      });
+      // Bedrock and DataZone are not offered in every region (not in AWS
+      // China); skip their endpoints when the deployment does not use them.
+      // Cross-region Bedrock (bedrock_region) is reached over the NAT gateway.
+      if (usesInRegionBedrock(this)) {
+        createdVpc.addInterfaceEndpoint("BedrockRuntimeEndpoint", {
+          service: interfaceEndpointService(
+            this,
+            "bedrock-runtime",
+            ec2.InterfaceVpcEndpointAwsService.BEDROCK_RUNTIME,
+          ),
+          privateDnsEnabled: true,
+        });
+      }
       createdVpc.addInterfaceEndpoint("BedrockAgentCoreEndpoint", {
-        service: ec2.InterfaceVpcEndpointAwsService.BEDROCK_AGENTCORE,
-        privateDnsEnabled: true,
-      });
-      createdVpc.addInterfaceEndpoint("CloudWatchLogsEndpoint", {
-        service: ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS,
-        privateDnsEnabled: true,
-      });
-      createdVpc.addInterfaceEndpoint("EcrApiEndpoint", {
-        service: ec2.InterfaceVpcEndpointAwsService.ECR,
-        privateDnsEnabled: true,
-      });
-      createdVpc.addInterfaceEndpoint("EcrDkrEndpoint", {
-        service: ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER,
-        privateDnsEnabled: true,
-      });
-      createdVpc.addInterfaceEndpoint("SsmEndpoint", {
-        service: ec2.InterfaceVpcEndpointAwsService.SSM,
-        privateDnsEnabled: true,
-      });
-      createdVpc.addInterfaceEndpoint("SecretsManagerEndpoint", {
-        service: ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER,
-        privateDnsEnabled: true,
-      });
-      const aossEndpoint = createdVpc.addInterfaceEndpoint("AossEndpoint", {
-        service: new ec2.InterfaceVpcEndpointService(
-          `com.amazonaws.${cdk.Stack.of(this).region}.aoss-data`,
+        service: interfaceEndpointService(
+          this,
+          "bedrock-agentcore",
+          ec2.InterfaceVpcEndpointAwsService.BEDROCK_AGENTCORE,
         ),
         privateDnsEnabled: true,
       });
-      this.aossVpcEndpointId = aossEndpoint.vpcEndpointId;
+      createdVpc.addInterfaceEndpoint("CloudWatchLogsEndpoint", {
+        service: interfaceEndpointService(
+          this,
+          "logs",
+          ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS,
+        ),
+        privateDnsEnabled: true,
+      });
+      createdVpc.addInterfaceEndpoint("EcrApiEndpoint", {
+        service: interfaceEndpointService(
+          this,
+          "ecr.api",
+          ec2.InterfaceVpcEndpointAwsService.ECR,
+        ),
+        privateDnsEnabled: true,
+      });
+      createdVpc.addInterfaceEndpoint("EcrDkrEndpoint", {
+        service: interfaceEndpointService(
+          this,
+          "ecr.dkr",
+          ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER,
+        ),
+        privateDnsEnabled: true,
+      });
+      createdVpc.addInterfaceEndpoint("SsmEndpoint", {
+        service: interfaceEndpointService(
+          this,
+          "ssm",
+          ec2.InterfaceVpcEndpointAwsService.SSM,
+        ),
+        privateDnsEnabled: true,
+      });
+      createdVpc.addInterfaceEndpoint("SecretsManagerEndpoint", {
+        service: interfaceEndpointService(
+          this,
+          "secretsmanager",
+          ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER,
+        ),
+        privateDnsEnabled: true,
+      });
+      if (aoss) {
+        const aossEndpoint = createdVpc.addInterfaceEndpoint("AossEndpoint", {
+          service: new ec2.InterfaceVpcEndpointService(
+            `com.amazonaws.${cdk.Stack.of(this).region}.aoss-data`,
+          ),
+          privateDnsEnabled: true,
+        });
+        this.aossVpcEndpointId = aossEndpoint.vpcEndpointId;
+      }
 
       // Additional interface endpoints: keep AWS API traffic private so
       // egress can be scoped away from the public internet. These cover the
       // services the ECS tasks and Lambdas call that previously required NAT.
       const region = cdk.Stack.of(this).region;
       createdVpc.addInterfaceEndpoint("StsEndpoint", {
-        service: ec2.InterfaceVpcEndpointAwsService.STS,
-        privateDnsEnabled: true,
-      });
-      createdVpc.addInterfaceEndpoint("EventBridgeEndpoint", {
-        service: ec2.InterfaceVpcEndpointAwsService.EVENTBRIDGE,
-        privateDnsEnabled: true,
-      });
-      createdVpc.addInterfaceEndpoint("SqsEndpoint", {
-        service: ec2.InterfaceVpcEndpointAwsService.SQS,
-        privateDnsEnabled: true,
-      });
-      createdVpc.addInterfaceEndpoint("StepFunctionsEndpoint", {
-        service: ec2.InterfaceVpcEndpointAwsService.STEP_FUNCTIONS,
-        privateDnsEnabled: true,
-      });
-      createdVpc.addInterfaceEndpoint("AthenaEndpoint", {
-        service: ec2.InterfaceVpcEndpointAwsService.ATHENA,
-        privateDnsEnabled: true,
-      });
-      createdVpc.addInterfaceEndpoint("GlueEndpoint", {
-        service: ec2.InterfaceVpcEndpointAwsService.GLUE,
-        privateDnsEnabled: true,
-      });
-      createdVpc.addInterfaceEndpoint("LambdaEndpoint", {
-        service: ec2.InterfaceVpcEndpointAwsService.LAMBDA,
-        privateDnsEnabled: true,
-      });
-      createdVpc.addInterfaceEndpoint("EcsEndpoint", {
-        service: ec2.InterfaceVpcEndpointAwsService.ECS,
-        privateDnsEnabled: true,
-      });
-      createdVpc.addInterfaceEndpoint("DataZoneEndpoint", {
-        service: ec2.InterfaceVpcEndpointAwsService.DATAZONE,
-        privateDnsEnabled: true,
-      });
-      // Neptune Analytics (neptune-graph) — control + data plane.
-      createdVpc.addInterfaceEndpoint("NeptuneGraphEndpoint", {
-        service: ec2.InterfaceVpcEndpointAwsService.NEPTUNE_ANALYTICS,
-        privateDnsEnabled: true,
-      });
-      createdVpc.addInterfaceEndpoint("NeptuneGraphDataEndpoint", {
-        service: ec2.InterfaceVpcEndpointAwsService.NEPTUNE_ANALYTICS_DATA,
-        privateDnsEnabled: true,
-      });
-      // OpenSearch Serverless control plane (create/delete collection, policies).
-      // No CDK constant exists; the data-plane endpoint above is separate.
-      createdVpc.addInterfaceEndpoint("AossControlPlaneEndpoint", {
-        service: new ec2.InterfaceVpcEndpointService(
-          `com.amazonaws.${region}.aoss`,
+        service: interfaceEndpointService(
+          this,
+          "sts",
+          ec2.InterfaceVpcEndpointAwsService.STS,
         ),
         privateDnsEnabled: true,
       });
+      createdVpc.addInterfaceEndpoint("EventBridgeEndpoint", {
+        service: interfaceEndpointService(
+          this,
+          "events",
+          ec2.InterfaceVpcEndpointAwsService.EVENTBRIDGE,
+        ),
+        privateDnsEnabled: true,
+      });
+      createdVpc.addInterfaceEndpoint("SqsEndpoint", {
+        service: interfaceEndpointService(
+          this,
+          "sqs",
+          ec2.InterfaceVpcEndpointAwsService.SQS,
+        ),
+        privateDnsEnabled: true,
+      });
+      createdVpc.addInterfaceEndpoint("StepFunctionsEndpoint", {
+        service: interfaceEndpointService(
+          this,
+          "states",
+          ec2.InterfaceVpcEndpointAwsService.STEP_FUNCTIONS,
+        ),
+        privateDnsEnabled: true,
+      });
+      createdVpc.addInterfaceEndpoint("AthenaEndpoint", {
+        service: interfaceEndpointService(
+          this,
+          "athena",
+          ec2.InterfaceVpcEndpointAwsService.ATHENA,
+        ),
+        privateDnsEnabled: true,
+      });
+      createdVpc.addInterfaceEndpoint("GlueEndpoint", {
+        service: interfaceEndpointService(
+          this,
+          "glue",
+          ec2.InterfaceVpcEndpointAwsService.GLUE,
+        ),
+        privateDnsEnabled: true,
+      });
+      createdVpc.addInterfaceEndpoint("LambdaEndpoint", {
+        service: interfaceEndpointService(
+          this,
+          "lambda",
+          ec2.InterfaceVpcEndpointAwsService.LAMBDA,
+        ),
+        privateDnsEnabled: true,
+      });
+      createdVpc.addInterfaceEndpoint("EcsEndpoint", {
+        service: interfaceEndpointService(
+          this,
+          "ecs",
+          ec2.InterfaceVpcEndpointAwsService.ECS,
+        ),
+        privateDnsEnabled: true,
+      });
+      if (resolveMetadataStoreBackend(this) === "smus") {
+        createdVpc.addInterfaceEndpoint("DataZoneEndpoint", {
+          service: interfaceEndpointService(
+            this,
+            "datazone",
+            ec2.InterfaceVpcEndpointAwsService.DATAZONE,
+          ),
+          privateDnsEnabled: true,
+        });
+      }
+      // Neptune Analytics (neptune-graph) — control + data plane. Not offered
+      // in AWS China, where the stacks use the Neptune DB cluster only.
+      if (!isChinaRegion(this)) {
+        createdVpc.addInterfaceEndpoint("NeptuneGraphEndpoint", {
+          service: ec2.InterfaceVpcEndpointAwsService.NEPTUNE_ANALYTICS,
+          privateDnsEnabled: true,
+        });
+        createdVpc.addInterfaceEndpoint("NeptuneGraphDataEndpoint", {
+          service: ec2.InterfaceVpcEndpointAwsService.NEPTUNE_ANALYTICS_DATA,
+          privateDnsEnabled: true,
+        });
+      }
+      // OpenSearch Serverless control plane (create/delete collection, policies).
+      // No CDK constant exists; the data-plane endpoint above is separate.
+      if (aoss) {
+        createdVpc.addInterfaceEndpoint("AossControlPlaneEndpoint", {
+          service: new ec2.InterfaceVpcEndpointService(
+            `com.amazonaws.${region}.aoss`,
+          ),
+          privateDnsEnabled: true,
+        });
+      }
     }
 
     // ── Security Groups ──────────────────────────────────────────────
@@ -366,12 +461,15 @@ export class NetworkStack extends SCLStack {
     );
 
     // AOSS VPC endpoint — dedicated SG so any component that needs AOSS
-    // can be granted access via an ingress rule here.
+    // can be granted access via an ingress rule here. With
+    // vector_store=opensearch it is attached to the managed domain instead, so
+    // the same ingress rules (here and in the consumer stacks) apply.
     this.aossSecurityGroup = new ec2.SecurityGroup(this, "AossSG", {
       vpc: this.vpc,
-      securityGroupName: this.prefixed("aoss-vpce-sg"),
-      description:
-        "AOSS VPC endpoint - accept HTTPS from authorized components",
+      securityGroupName: this.prefixed(aoss ? "aoss-vpce-sg" : "opensearch-sg"),
+      description: aoss
+        ? "AOSS VPC endpoint - accept HTTPS from authorized components"
+        : "OpenSearch domain - accept HTTPS from authorized components",
       allowAllOutbound: false,
     });
     this.aossSecurityGroup.addIngressRule(

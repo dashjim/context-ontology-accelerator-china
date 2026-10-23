@@ -15,5 +15,8 @@ export function buildQueryEndpoint(
   // Validate region format to prevent URL injection via tampered config
   if (!/^[a-z]{2}-[a-z]+-\d+$/.test(ctx.region)) return undefined;
   const encoded = encodeURIComponent(ctx.serveRuntimeArn);
-  return `https://bedrock-agentcore.${ctx.region}.amazonaws.com/runtimes/${encoded}/invocations?qualifier=DEFAULT`;
+  const dnsSuffix = ctx.region.startsWith("cn-")
+    ? "amazonaws.com.cn"
+    : "amazonaws.com";
+  return `https://bedrock-agentcore.${ctx.region}.${dnsSuffix}/runtimes/${encoded}/invocations?qualifier=DEFAULT`;
 }

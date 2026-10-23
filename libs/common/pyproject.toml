@@ -5,11 +5,16 @@ description = "Shared utilities for Context Ontology Accelerator"
 requires-python = ">=3.12"
 
 dependencies = [
-    "boto3>=1.35.0",
+    # >=1.39: botocore sends AWS_BEARER_TOKEN_BEDROCK (Bedrock API keys, see
+    # coa_common.bedrock_access) as a bearer token from this release on.
+    "boto3>=1.39.0",
     # Cedar policy engine for coa_authorization (shared by the control-plane API
     # authorizer and the serve-path query authorizer). arm64 cp312 wheel exists.
     "cedarpy>=4.8.0",
     "cryptography>=50.0.0",
+    # OpenAI-compatible LLM transport (coa_common.openai_compat), used only when
+    # LLM_PROVIDER=openai_compatible (regions without Bedrock). Imported lazily.
+    "httpx>=0.27",
     # Shared AOSS vector client (coa_common.opensearch). opensearch-py
     # provides the client + SigV4 signer; requests-aws4auth is a transitive of the
     # RequestsHttpConnection path. Consolidates the per-package clients that

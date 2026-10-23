@@ -143,3 +143,14 @@ class TestOnboardingHint:
         assert "hcp360" in hint
         assert "lakeformation grant-permissions" in hint
         assert "arn:aws:iam::111:role/connector" in hint
+
+
+class TestCallerRoleArn:
+    @pytest.mark.parametrize("partition", ["aws", "aws-cn", "aws-us-gov"])
+    def test_assumed_role_rewritten_in_the_callers_partition(self, partition):
+        sts = MagicMock()
+        sts.get_caller_identity.return_value = {
+            "Arn": f"arn:{partition}:sts::111122223333:assumed-role/connector/session-1",
+        }
+        with patch.object(lf_grant.boto3, "client", return_value=sts):
+            assert lf_grant._caller_role_arn() == f"arn:{partition}:iam::111122223333:role/connector"

@@ -80,9 +80,12 @@ describe("StorageStack", () => {
         network,
         env: TEST_ENV,
       });
-      Template.fromStack(storage).hasResourceProperties("AWS::Neptune::DBInstance", {
-        DBInstanceClass: "db.r8g.2xlarge",
-      });
+      Template.fromStack(storage).hasResourceProperties(
+        "AWS::Neptune::DBInstance",
+        {
+          DBInstanceClass: "db.r8g.2xlarge",
+        },
+      );
     });
 
     it("applies DESTROY removal policy to cluster and instance", () => {
@@ -314,6 +317,43 @@ describe("StorageStack", () => {
 
     it("rejects min OCU greater than max OCU", () => {
       expect(buildWithOcu(16, 8)).toThrow(/cannot exceed/);
+    });
+  });
+  describe("vector_store=opensearch", () => {
+    const build = (context: Record<string, unknown>) => () => {
+      const app = new cdk.App({
+        context: { vector_store: "opensearch", ...context },
+      });
+      const network = new NetworkStack(app, "TestNetwork", { env: TEST_ENV });
+      return Template.fromStack(
+        new StorageStack(app, "TestStorage", { network, env: TEST_ENV }),
+      );
+    };
+
+    it("replaces the collection with a single-node domain", () => {
+      const template = build({})();
+      template.resourceCountIs("AWS::OpenSearchServerless::Collection", 0);
+      template.resourceCountIs("AWS::OpenSearchServerless::SecurityPolicy", 0);
+      template.hasResourceProperties("AWS::OpenSearchService::Domain", {
+        ClusterConfig: Match.objectLike({
+          InstanceType: "t3.small.search",
+          InstanceCount: 1,
+        }),
+      });
+    });
+
+    it("takes the instance type from opensearch_instance_type", () => {
+      build({
+        opensearch_instance_type: "t3.medium.search",
+      })().hasResourceProperties("AWS::OpenSearchService::Domain", {
+        ClusterConfig: Match.objectLike({ InstanceType: "t3.medium.search" }),
+      });
+    });
+
+    it("rejects a prefix that makes the domain name too long", () => {
+      expect(build({ resource_prefix: "a-very-long-prefix" })).toThrow(
+        /3-28 lowercase/,
+      );
     });
   });
 });

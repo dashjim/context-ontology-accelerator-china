@@ -298,6 +298,11 @@ npx cdk bootstrap aws://<ACCOUNT_ID>/<REGION>
 
     Preflight checks both and fails fast if either is missing.
 
+    AWS China (`cn-` regions) is the exception: `us-east-1` is outside the `aws-cn` partition, so the
+    CDK context switch `edge_waf` defaults off there, no `*-edge-waf` stack is created, the CloudFront
+    distribution gets no WebACL (unless `cloudfront_web_acl_id` names one), and only the deploy region
+    needs bootstrapping.
+
 
 ## Installation
 
@@ -594,6 +599,40 @@ SCL_NL2SQL_GRAPH_EXPAND_MAX_TABLES=12 make deploy-dev
 Leaving either setting unset leaves the runtime's default in charge; the stack only sets the Serve runtime variable (`SERVE_NL2SQL_GRAPH_EXPAND` / `SERVE_NL2SQL_GRAPH_EXPAND_MAX_TABLES`) when you pass a value. Changing either one is a stack update, not an image rebuild. A single request can also override the deployment setting with `options.flatGraphExpand` (`true` or `false`). An A/B test that compares the expansion on and off must pass `flatGraphExpand: false` for the "off" arm; leaving the option out now means on.
 
 `scripts/deploy.sh` maps the variables above to the CDK context parameters `serve_nl2sql_graph_expand` and `serve_nl2sql_graph_expand_max_tables`. On a direct `cdk deploy`, pass them as context instead — `--context serve_nl2sql_graph_expand=false` — or set them in the `context` block of `infra/cdk.json`.
+
+#### Other CDK context through `deploy.sh`
+
+`SCL_EXTRA_CONTEXT` is appended verbatim to the context `scripts/deploy.sh` passes to CDK, for keys that have no `SCL_*` variable of their own. `preflight-deploy.sh` and `check-smus-admin-principal.sh` also read `edge_waf`, `llm_provider`, `bedrock_region` and `metadata_store_backend` from it.
+
+In AWS China (`cn-` regions) `llm_provider` defaults to `openai_compatible`: every LLM and embedding call goes to a domestic OpenAI-compatible provider, such as SiliconFlow below. Store the provider API key in a Secrets Manager secret in the deploy account (the bare key, or JSON `{"api_key": "..."}`). `openai_compat_chat_model` / `openai_compat_embed_model` replace the Bedrock model IDs (`openai_compat_model_map` maps individual IDs instead), so preflight and synth skip the Bedrock model-ID check.
+
+```bash
+SCL_EXTRA_CONTEXT="-c openai_compat_base_url=https://api.siliconflow.cn/v1 \
+  -c openai_compat_api_key_secret_arn=arn:aws-cn:secretsmanager:<REGION>:<ACCOUNT_ID>:secret:<NAME> \
+  -c openai_compat_chat_model=deepseek-ai/DeepSeek-V3.2 \
+  -c openai_compat_embed_model=Qwen/Qwen3-Embedding-8B" make deploy-dev
+```
+
+A China deployment must not depend on commercial-partition (Global account) resources. Do not use cross-partition Bedrock there — `llm_provider=bedrock` with `bedrock_region` set to a commercial region and a Global-account `bedrock_api_key_secret_arn` — even though it synthesizes.
+
+#### Package mirrors for image builds
+
+`cdk deploy` builds the container images on the deploy host. Where PyPI, Debian or the PyTorch index are slow or unreachable from that host (AWS China, for example), point the builds at mirrors. Every key is unset by default, also in `cn-` regions: which mirror is reachable depends on the build host, not the deploy region. Unset, the images build exactly as before.
+
+| Context key | Build arg(s) | Used by |
+| --- | --- | --- |
+| `build_pip_index_url` | `PIP_INDEX_URL`, `UV_DEFAULT_INDEX` | every image (pip; uv in the Context Manager image) |
+| `build_apt_mirror` | `APT_MIRROR` | Debian images (Context Manager, ontology engine, DB enrichment, KG build). A host name serving `/debian` and `/debian-security` over HTTPS, replacing `deb.debian.org` |
+| `build_torch_index_url` | `TORCH_INDEX_URL` | document preprocessing: a PEP 503 index replacing `https://download.pytorch.org/whl/cpu` |
+| `build_torch_find_links` | `TORCH_FIND_LINKS` | document preprocessing: a flat page of torch wheels (`pip --find-links`) used instead of that index |
+
+```bash
+SCL_EXTRA_CONTEXT="-c build_pip_index_url=https://repo.huaweicloud.com/repository/pypi/simple \
+  -c build_apt_mirror=repo.huaweicloud.com \
+  -c build_torch_find_links=https://mirrors.aliyun.com/pytorch-wheels/cpu/" make deploy-dev
+```
+
+Python Lambda bundles are built on the host with `uv`, which reads `UV_DEFAULT_INDEX` from the host environment; the Docker fallback (used when the local build fails) gets the host's `PIP_INDEX_URL`. Export both to the same mirror for those.
 
 ### VKG Task Sizing
 

@@ -2021,6 +2021,30 @@ class TestHandleListTables:
             status, _ = _parse(_dr._handle_list_tables(self._make_list_event(), _NAMESPACE_ID, _SOURCE_ID))
         assert status == 500
 
+    def test_list_tables_dynamodb_backend_needs_no_smus_domain(self, monkeypatch):
+        """The DynamoDB metadata store has no DataZone domain: an empty
+        SMUS_DOMAIN_ID must not 500 — the request proceeds (here to a 404)."""
+        monkeypatch.setenv("METADATA_STORE_BACKEND", "dynamodb")
+        monkeypatch.setenv("METADATA_STORE_TABLE", "metadata-store")
+        mock_ns_dao = dao_double()
+        mock_ns_dao.get.return_value = None
+
+        with (
+            patch(f"{_DR}._SMUS_DOMAIN_ID", ""),
+            patch(f"{_DR}._get_ns_dao", return_value=mock_ns_dao),
+        ):
+            status, _ = _parse(_dr._handle_list_tables(self._make_list_event(), _NAMESPACE_ID, _SOURCE_ID))
+
+        assert status == 404
+
+    def test_list_tables_dynamodb_backend_without_table_returns_500(self, monkeypatch):
+        monkeypatch.setenv("METADATA_STORE_BACKEND", "dynamodb")
+        monkeypatch.delenv("METADATA_STORE_TABLE", raising=False)
+        with patch(f"{_DR}._SMUS_DOMAIN_ID", "domain-id"):
+            status, body = _parse(_dr._handle_list_tables(self._make_list_event(), _NAMESPACE_ID, _SOURCE_ID))
+        assert status == 500
+        assert body["error"] == "METADATA_STORE_TABLE not configured"
+
     def test_list_tables_namespace_not_found_returns_404(self):
         mock_ns_dao = dao_double()
         mock_ns_dao.get.return_value = None
@@ -2992,8 +3016,23 @@ class TestHandleListTables:
 class TestHandleGetTable:
     def test_get_table_no_smus_domain_returns_500(self):
         with patch(f"{_DR}._SMUS_DOMAIN_ID", ""):
-            status, _ = _parse(_dr._handle_get_table(_NAMESPACE_ID, _SOURCE_ID, "mydb.mytable"))
+            status, body = _parse(_dr._handle_get_table(_NAMESPACE_ID, _SOURCE_ID, "mydb.mytable"))
         assert status == 500
+        assert body["error"] == "SMUS_DOMAIN_ID not configured"
+
+    def test_get_table_dynamodb_backend_needs_no_smus_domain(self, monkeypatch):
+        monkeypatch.setenv("METADATA_STORE_BACKEND", "dynamodb")
+        monkeypatch.setenv("METADATA_STORE_TABLE", "metadata-store")
+        mock_ns_dao = dao_double()
+        mock_ns_dao.get.return_value = None
+
+        with (
+            patch(f"{_DR}._SMUS_DOMAIN_ID", ""),
+            patch(f"{_DR}._get_ns_dao", return_value=mock_ns_dao),
+        ):
+            status, _ = _parse(_dr._handle_get_table(_NAMESPACE_ID, _SOURCE_ID, "mydb.mytable"))
+
+        assert status == 404
 
     def test_get_table_returns_column_confidence(self):
         mock_ns_dao = dao_double()
@@ -3862,7 +3901,7 @@ def _review_env():
     """
     mock_ns_dao = dao_double()
     mock_ns_dao.get.return_value = {"dataZoneProjectId": "proj-123"}
-    mock_smus = create_autospec(_dr.SMUSClient, instance=True)
+    mock_smus = create_autospec(_dr.MetadataStoreClient, instance=True)
     mock_dao = dao_double()
     mock_dao.get.return_value = {
         "PK": f"NS#{_NAMESPACE_ID}",
@@ -3915,6 +3954,20 @@ class TestReviewTable:
                 )
             )
         assert status == 500
+
+    def test_dynamodb_backend_needs_no_smus_domain(self, _review_env, monkeypatch):
+        """_smus_or_500 is backend-aware: on DynamoDB an empty SMUS_DOMAIN_ID
+        still yields a client and the review proceeds (here to a 404)."""
+        monkeypatch.setenv("METADATA_STORE_BACKEND", "dynamodb")
+        monkeypatch.setenv("METADATA_STORE_TABLE", "metadata-store")
+        _review_env["ns_dao"].get.return_value = None
+        with patch(f"{_DR}._SMUS_DOMAIN_ID", ""):
+            status, _ = _parse(
+                _dr._handle_review_table(
+                    self._event({"decision": "APPROVED"}), _NAMESPACE_ID, _SOURCE_ID, self._TABLE_ID
+                )
+            )
+        assert status == 404
 
     def test_namespace_not_found_returns_404(self, _review_env):
         _review_env["ns_dao"].get.return_value = None

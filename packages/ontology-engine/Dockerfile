@@ -8,6 +8,15 @@
 # python:3.12-slim, digest resolved from the tag on 2026-09-01.
 FROM --platform=linux/amd64 public.ecr.aws/docker/library/python:3.12-slim@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f
 
+# Optional package-mirror overrides for builds on hosts where the public
+# indexes are slow or unreachable (e.g. AWS China), passed by CDK as build args
+# from the build_* context keys. The defaults keep the stock sources: an empty
+# APT_MIRROR leaves the Debian sources untouched, and pip already defaults to
+# https://pypi.org/simple. Build args are visible to RUN as environment
+# variables but are not persisted in the image.
+ARG APT_MIRROR=
+ARG PIP_INDEX_URL=https://pypi.org/simple
+
 WORKDIR /app
 
 # Java runtime for owlready2 HermiT reasoner (tier-1 validation).
@@ -16,7 +25,11 @@ WORKDIR /app
 # release the configured suites are trixie + trixie-updates + trixie-security,
 # so a plain `upgrade` is security/point-release only. Use `upgrade`, never
 # `dist-upgrade` — the latter may remove packages to satisfy dependencies.
-RUN apt-get update && \
+RUN if [ -n "$APT_MIRROR" ]; then \
+      sed -i "s|http://deb.debian.org/|https://${APT_MIRROR}/|g" /etc/apt/sources.list.d/debian.sources && \
+      grep -q "https://${APT_MIRROR}/" /etc/apt/sources.list.d/debian.sources; \
+    fi && \
+    apt-get update && \
     apt-get install -y --no-install-recommends default-jre-headless curl && \
     apt-get upgrade -y && \
     apt-get clean && rm -rf /var/lib/apt/lists/*

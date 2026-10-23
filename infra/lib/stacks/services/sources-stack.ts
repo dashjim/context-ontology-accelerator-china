@@ -38,6 +38,17 @@ import {
 import { Paths, fromRoot } from "../../paths";
 import { bundlePython } from "../../utils/python-bundling";
 import { bedrockModelArn } from "../../utils/bedrock-utils";
+import {
+  grantLlmProviderSecret,
+  imageBuildArgs,
+  importMetadataStoreTable,
+  llmProviderEnv,
+  grantVectorStoreDomain,
+  metadataStoreEnv,
+  resolveVectorStore,
+  usesInRegionBedrock,
+  VECTOR_STORE_WRITE_ACTIONS,
+} from "../../utils/deployment-switches";
 import { NetworkStack } from "../foundation/network-stack";
 import { StorageStack } from "../foundation/storage-stack";
 import { TABLE_NAMES } from "@coa/shared";
@@ -139,6 +150,8 @@ export class SourcesStack extends SCLStack {
       props.bedrockChatModelId ?? DEFAULT_BEDROCK_CHAT_MODEL_ID;
     const embedModelId = props.bedrockEmbedModelId ?? DEFAULT_BEDROCK_MODEL_ID;
     const embedDimensions = String(props.bedrockEmbedDimensions ?? 1024);
+    // The Bedrock GuardrailStack is only deployed for in-region Bedrock.
+    const bedrockGuardrails = usesInRegionBedrock(this);
 
     const vpc = props.network.vpc;
     const lambdaSecurityGroup = props.network.lambdaSecurityGroup;
@@ -160,10 +173,15 @@ export class SourcesStack extends SCLStack {
       );
 
     // ── Resolve namespace resources via SSM ──────────────────────────
-    const domainId = ssm.StringParameter.valueForStringParameter(
-      this,
-      `${ssmPrefix}/smus/domain-id`,
-    );
+    // DynamoDB metadata store (no DataZone, so no /smus/domain-id) —
+    // undefined on SMUS.
+    const metadataStoreTable = importMetadataStoreTable(this);
+    const domainId = metadataStoreTable
+      ? undefined
+      : ssm.StringParameter.valueForStringParameter(
+          this,
+          `${ssmPrefix}/smus/domain-id`,
+        );
     const projectAccessRoleArn = ssm.StringParameter.valueForStringParameter(
       this,
       `${ssmPrefix}/smus/dz-project-access-role-arn`,
@@ -407,8 +425,8 @@ export class SourcesStack extends SCLStack {
       new iam.PolicyStatement({
         actions: ["glue:GetConnection"],
         resources: [
-          `arn:aws:glue:${this.region}:${this.account}:catalog`,
-          `arn:aws:glue:${this.region}:${this.account}:connection/${fedResourcePrefix}*`,
+          `arn:${this.partition}:glue:${this.region}:${this.account}:catalog`,
+          `arn:${this.partition}:glue:${this.region}:${this.account}:connection/${fedResourcePrefix}*`,
         ],
       }),
     );
@@ -435,7 +453,7 @@ export class SourcesStack extends SCLStack {
       new iam.PolicyStatement({
         sid: "ReadCredentialSecretInAccount",
         actions: ["secretsmanager:GetSecretValue"],
-        resources: ["arn:aws:secretsmanager:*:*:secret:*"],
+        resources: [`arn:${this.partition}:secretsmanager:*:*:secret:*`],
         conditions: {
           StringEquals: { "aws:ResourceAccount": this.account },
           Null: { [`secretsmanager:ResourceTag/${nsTagKey}`]: "false" },
@@ -446,7 +464,7 @@ export class SourcesStack extends SCLStack {
       new iam.PolicyStatement({
         sid: "ReadCredentialSecretCrossAccount",
         actions: ["secretsmanager:GetSecretValue"],
-        resources: ["arn:aws:secretsmanager:*:*:secret:*"],
+        resources: [`arn:${this.partition}:secretsmanager:*:*:secret:*`],
         conditions: {
           StringNotEquals: { "aws:ResourceAccount": this.account },
           // A negated condition evaluates TRUE when its key is absent, so
@@ -470,7 +488,9 @@ export class SourcesStack extends SCLStack {
         actions: ["kms:Decrypt"],
         resources: ["*"],
         conditions: {
-          StringLike: { "kms:ViaService": "secretsmanager.*.amazonaws.com" },
+          StringLike: {
+            "kms:ViaService": `secretsmanager.*.${this.urlSuffix}`,
+          },
         },
       }),
     );
@@ -499,7 +519,7 @@ export class SourcesStack extends SCLStack {
     // Glue's managed connector runs a PRE-FLIGHT authorization check before it
     // touches any real ENI: it dry-runs CreateNetworkInterface,
     // DescribeNetworkInterfaces and DeleteNetworkInterface. That check authorizes
-    // against the WILDCARD resource `arn:aws:ec2:<region>:<account>:*/*`, which no
+    // against the WILDCARD resource `arn:<partition>:ec2:<region>:<account>:*/*`, which no
     // enumeration of concrete resource types can satisfy. Captured from CloudTrail
     // in a failing account (2026-08-06):
     //
@@ -561,7 +581,7 @@ export class SourcesStack extends SCLStack {
         sid: "Ec2CreateNetworkInterfacePermissionForGlue",
         actions: ["ec2:CreateNetworkInterfacePermission"],
         resources: [
-          `arn:aws:ec2:${this.region}:${this.account}:network-interface/*`,
+          `arn:${this.partition}:ec2:${this.region}:${this.account}:network-interface/*`,
         ],
         conditions: {
           StringEquals: { "ec2:AuthorizedService": "glue.amazonaws.com" },
@@ -641,8 +661,9 @@ export class SourcesStack extends SCLStack {
         SOURCES_TABLE: this.sourcesTable.tableName,
         SOURCE_SCAN_JOBS_TABLE: this.sourceScanJobsTable.tableName,
         NAMESPACES_TABLE: namespacesTableName,
-        SMUS_DOMAIN_ID: domainId,
+        ...(domainId && { SMUS_DOMAIN_ID: domainId }),
         PROJECT_ACCESS_ROLE_ARN: projectAccessRoleArn,
+        ...metadataStoreEnv(metadataStoreTable),
         // BARE prefix — keys the namespace tag this handler re-verifies against the
         // STORED row: the credential secret before the connector reads it, and the
         // Glue database's ownership before it reads the catalog or samples rows.
@@ -695,6 +716,7 @@ export class SourcesStack extends SCLStack {
     // read-write separately.
     namespacesTable.grantReadData(dbConnectorFn);
     projectAccessRole.grantAssumeRole(dbConnectorFn.role!);
+    metadataStoreTable?.grantReadWriteData(dbConnectorFn);
 
     // Glue catalog access: same-account, deployment region only.
     // Glue resources are region-scoped; cross-region access is not required
@@ -723,15 +745,15 @@ export class SourcesStack extends SCLStack {
           "glue:GetTags",
         ],
         resources: [
-          `arn:aws:glue:${this.region}:${this.account}:catalog`,
+          `arn:${this.partition}:glue:${this.region}:${this.account}:catalog`,
           // The nested-catalog resource federated reads authorize against.
           // Account-wide because catalog names arrive per-source at runtime and
           // are not knowable at synth; mirrors the federation-provisioner and
           // serve grants. Actions stay read-only.
-          `arn:aws:glue:${this.region}:${this.account}:catalog/*`,
-          `arn:aws:glue:${this.region}:${this.account}:database/*`,
-          `arn:aws:glue:${this.region}:${this.account}:table/*/*`,
-          `arn:aws:glue:${this.region}:${this.account}:connection/*`,
+          `arn:${this.partition}:glue:${this.region}:${this.account}:catalog/*`,
+          `arn:${this.partition}:glue:${this.region}:${this.account}:database/*`,
+          `arn:${this.partition}:glue:${this.region}:${this.account}:table/*/*`,
+          `arn:${this.partition}:glue:${this.region}:${this.account}:connection/*`,
         ],
       }),
     );
@@ -748,7 +770,7 @@ export class SourcesStack extends SCLStack {
           "athena:GetWorkGroup",
         ],
         resources: [
-          `arn:aws:athena:${this.region}:${this.account}:workgroup/*`,
+          `arn:${this.partition}:athena:${this.region}:${this.account}:workgroup/*`,
         ],
       }),
     );
@@ -763,7 +785,7 @@ export class SourcesStack extends SCLStack {
         sid: "CustomConnectorCatalogRead",
         actions: ["athena:GetDataCatalog"],
         resources: [
-          `arn:aws:athena:${this.region}:${this.account}:datacatalog/${fedResourcePrefix}*`,
+          `arn:${this.partition}:athena:${this.region}:${this.account}:datacatalog/${fedResourcePrefix}*`,
         ],
       }),
     );
@@ -793,7 +815,7 @@ export class SourcesStack extends SCLStack {
         // aws:ResourceTag natively for InvokeFunction, with no per-resource opt-in,
         // so an untagged function is simply unreachable. Preferred over a name
         // convention because a tag cannot be matched by accident.
-        resources: [`arn:aws:lambda:${this.region}:*:function:*`],
+        resources: [`arn:${this.partition}:lambda:${this.region}:*:function:*`],
         conditions: {
           "ForAnyValue:StringEquals": {
             "aws:CalledVia": "athena.amazonaws.com",
@@ -832,7 +854,9 @@ export class SourcesStack extends SCLStack {
         sid: "DenyAthenaInvokeOfUntaggedFunctions",
         effect: iam.Effect.DENY,
         actions: ["lambda:InvokeFunction"],
-        resources: [`arn:aws:lambda:*:${this.account}:function:*`],
+        resources: [
+          `arn:${this.partition}:lambda:*:${this.account}:function:*`,
+        ],
         conditions: {
           "ForAnyValue:StringEquals": {
             "aws:CalledVia": "athena.amazonaws.com",
@@ -952,8 +976,8 @@ export class SourcesStack extends SCLStack {
           "glue:PassConnection",
         ],
         resources: [
-          `arn:aws:glue:${this.region}:${this.account}:catalog`,
-          `arn:aws:glue:${this.region}:${this.account}:connection/${fedResourcePrefix}*`,
+          `arn:${this.partition}:glue:${this.region}:${this.account}:catalog`,
+          `arn:${this.partition}:glue:${this.region}:${this.account}:connection/${fedResourcePrefix}*`,
         ],
       }),
     );
@@ -970,9 +994,9 @@ export class SourcesStack extends SCLStack {
           "glue:GetDatabase",
         ],
         resources: [
-          `arn:aws:glue:${this.region}:${this.account}:catalog`,
-          `arn:aws:glue:${this.region}:${this.account}:catalog/${fedResourcePrefix}*`,
-          `arn:aws:glue:${this.region}:${this.account}:database/${fedResourcePrefix}*/*`,
+          `arn:${this.partition}:glue:${this.region}:${this.account}:catalog`,
+          `arn:${this.partition}:glue:${this.region}:${this.account}:catalog/${fedResourcePrefix}*`,
+          `arn:${this.partition}:glue:${this.region}:${this.account}:database/${fedResourcePrefix}*/*`,
         ],
       }),
     );
@@ -995,10 +1019,10 @@ export class SourcesStack extends SCLStack {
           "glue:GetTables",
         ],
         resources: [
-          `arn:aws:glue:${this.region}:${this.account}:catalog`,
-          `arn:aws:glue:${this.region}:${this.account}:catalog/${fedResourcePrefix}*`,
-          `arn:aws:glue:${this.region}:${this.account}:database/${fedResourcePrefix}*`,
-          `arn:aws:glue:${this.region}:${this.account}:table/${fedResourcePrefix}*`,
+          `arn:${this.partition}:glue:${this.region}:${this.account}:catalog`,
+          `arn:${this.partition}:glue:${this.region}:${this.account}:catalog/${fedResourcePrefix}*`,
+          `arn:${this.partition}:glue:${this.region}:${this.account}:database/${fedResourcePrefix}*`,
+          `arn:${this.partition}:glue:${this.region}:${this.account}:table/${fedResourcePrefix}*`,
         ],
       }),
     );
@@ -1019,9 +1043,9 @@ export class SourcesStack extends SCLStack {
           "glue:GetTags",
         ],
         resources: [
-          `arn:aws:glue:${this.region}:${this.account}:catalog`,
-          `arn:aws:glue:${this.region}:${this.account}:database/*`,
-          `arn:aws:glue:${this.region}:${this.account}:table/*/*`,
+          `arn:${this.partition}:glue:${this.region}:${this.account}:catalog`,
+          `arn:${this.partition}:glue:${this.region}:${this.account}:database/*`,
+          `arn:${this.partition}:glue:${this.region}:${this.account}:table/*/*`,
         ],
       }),
     );
@@ -1049,7 +1073,7 @@ export class SourcesStack extends SCLStack {
         sid: "ReadConsumerQueryRoleParam",
         actions: ["ssm:GetParameter"],
         resources: [
-          `arn:aws:ssm:${this.region}:${this.account}:parameter${serveRuntimeRoleArnParam}`,
+          `arn:${this.partition}:ssm:${this.region}:${this.account}:parameter${serveRuntimeRoleArnParam}`,
         ],
       }),
     );
@@ -1062,7 +1086,7 @@ export class SourcesStack extends SCLStack {
           "secretsmanager:GetResourcePolicy",
           "secretsmanager:PutResourcePolicy",
         ],
-        resources: ["arn:aws:secretsmanager:*:*:secret:*"],
+        resources: [`arn:${this.partition}:secretsmanager:*:*:secret:*`],
         conditions: {
           StringEquals: {
             "aws:ResourceAccount": this.account,
@@ -1091,7 +1115,9 @@ export class SourcesStack extends SCLStack {
       new iam.PolicyStatement({
         sid: "DescribeSecretForNamespaceBinding",
         actions: ["secretsmanager:DescribeSecret"],
-        resources: [`arn:aws:secretsmanager:*:${this.account}:secret:*`],
+        resources: [
+          `arn:${this.partition}:secretsmanager:*:${this.account}:secret:*`,
+        ],
       }),
     );
     // Pass + read the federated-catalog role (Glue connection ROLE_ARN and LF
@@ -1207,7 +1233,7 @@ export class SourcesStack extends SCLStack {
       new iam.PolicyStatement({
         sid: "SecretsManagerCustomerProvided",
         actions: ["secretsmanager:GetSecretValue"],
-        resources: [`arn:aws:secretsmanager:*:*:secret:*`],
+        resources: [`arn:${this.partition}:secretsmanager:*:*:secret:*`],
         conditions: {
           StringEquals: {
             "aws:ResourceAccount": this.account,
@@ -1236,7 +1262,9 @@ export class SourcesStack extends SCLStack {
       new iam.PolicyStatement({
         sid: "DescribeSecretForNamespaceBinding",
         actions: ["secretsmanager:DescribeSecret"],
-        resources: [`arn:aws:secretsmanager:*:${this.account}:secret:*`],
+        resources: [
+          `arn:${this.partition}:secretsmanager:*:${this.account}:secret:*`,
+        ],
       }),
     );
     // STS: assume Context Ontology Accelerator-managed roles + customer-provided
@@ -1295,6 +1323,7 @@ export class SourcesStack extends SCLStack {
             // ("exec format error"). The pin makes the arch independent of the
             // build host's Docker default.
             platform: Platform.LINUX_AMD64,
+            buildArgs: imageBuildArgs(this),
           });
 
     dbEnrichmentTaskDef.addContainer("DbEnrichmentContainer", {
@@ -1304,8 +1333,9 @@ export class SourcesStack extends SCLStack {
         SOURCES_TABLE: this.sourcesTable.tableName,
         SOURCE_SCAN_JOBS_TABLE: this.sourceScanJobsTable.tableName,
         NAMESPACES_TABLE: namespacesTableName,
-        SMUS_DOMAIN_ID: domainId,
+        ...(domainId && { SMUS_DOMAIN_ID: domainId }),
         PROJECT_ACCESS_ROLE_ARN: projectAccessRoleArn,
+        ...metadataStoreEnv(metadataStoreTable),
         // ECS does not inject a region into task containers, so without this
         // resolve_region() falls back to us-east-1 and every Bedrock call —
         // including ApplyGuardrail — targets the wrong region. In a non-us-east-1
@@ -1322,6 +1352,9 @@ export class SourcesStack extends SCLStack {
         // so the shared BedrockClient default (a `us.` profile) always won and
         // enrichment was unreachable from a non-US deploy (#94).
         BEDROCK_CHAT_MODEL_ID: chatModelId,
+        // BEDROCK_* access settings (cross-region Bedrock), or LLM_PROVIDER /
+        // OPENAI_COMPAT_* when llm_provider=openai_compatible.
+        ...llmProviderEnv(this),
       },
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: "sources-db-enrichment",
@@ -1333,13 +1366,15 @@ export class SourcesStack extends SCLStack {
     this.sourceScanJobsTable.grantReadWriteData(dbEnrichmentTaskDef.taskRole);
     namespacesTable.grantReadData(dbEnrichmentTaskDef.taskRole);
     projectAccessRole.grantAssumeRole(dbEnrichmentTaskDef.taskRole);
+    metadataStoreTable?.grantReadWriteData(dbEnrichmentTaskDef.taskRole);
+    grantLlmProviderSecret(this, dbEnrichmentTaskDef.taskRole);
 
     dbEnrichmentTaskDef.taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         actions: ["bedrock:InvokeModel"],
         resources: [
-          `arn:aws:bedrock:*::foundation-model/*`,
-          `arn:aws:bedrock:*:${this.account}:inference-profile/*`,
+          `arn:${this.partition}:bedrock:*::foundation-model/*`,
+          `arn:${this.partition}:bedrock:*:${this.account}:inference-profile/*`,
         ],
       }),
     );
@@ -1349,7 +1384,7 @@ export class SourcesStack extends SCLStack {
       new iam.PolicyStatement({
         actions: ["bedrock:ApplyGuardrail"],
         resources: [
-          `arn:aws:bedrock:${this.region}:${this.account}:guardrail/*`,
+          `arn:${this.partition}:bedrock:${this.region}:${this.account}:guardrail/*`,
         ],
       }),
     );
@@ -1357,7 +1392,7 @@ export class SourcesStack extends SCLStack {
       new iam.PolicyStatement({
         actions: ["ssm:GetParameter"],
         resources: [
-          `arn:aws:ssm:${this.region}:${this.account}:parameter${ssmPrefix}/bedrock/retrieval-guardrail-id`,
+          `arn:${this.partition}:ssm:${this.region}:${this.account}:parameter${ssmPrefix}/bedrock/retrieval-guardrail-id`,
         ],
       }),
     );
@@ -1382,7 +1417,7 @@ export class SourcesStack extends SCLStack {
         sid: "ReadNamespaceBoundCredentialSecret",
         actions: ["secretsmanager:GetSecretValue"],
         resources: [
-          `arn:aws:secretsmanager:${this.region}:${this.account}:secret:${this.prefixed("datasource-")}*`,
+          `arn:${this.partition}:secretsmanager:${this.region}:${this.account}:secret:${this.prefixed("datasource-")}*`,
         ],
         conditions: {
           Null: { [`secretsmanager:ResourceTag/${nsTagKey}`]: "false" },
@@ -1408,11 +1443,11 @@ export class SourcesStack extends SCLStack {
           "glue:GetCatalogs",
         ],
         resources: [
-          `arn:aws:glue:${this.region}:${this.account}:catalog`,
-          `arn:aws:glue:${this.region}:${this.account}:catalog/*`,
-          `arn:aws:glue:${this.region}:${this.account}:database/*`,
-          `arn:aws:glue:${this.region}:${this.account}:table/*/*`,
-          `arn:aws:glue:${this.region}:${this.account}:connection/*`,
+          `arn:${this.partition}:glue:${this.region}:${this.account}:catalog`,
+          `arn:${this.partition}:glue:${this.region}:${this.account}:catalog/*`,
+          `arn:${this.partition}:glue:${this.region}:${this.account}:database/*`,
+          `arn:${this.partition}:glue:${this.region}:${this.account}:table/*/*`,
+          `arn:${this.partition}:glue:${this.region}:${this.account}:connection/*`,
         ],
       }),
     );
@@ -1813,8 +1848,9 @@ export class SourcesStack extends SCLStack {
         // each terminal approve/reject so the console shows real history.
         SOURCE_SCAN_JOBS_TABLE: this.sourceScanJobsTable.tableName,
         NAMESPACES_TABLE: namespacesTableName,
-        SMUS_DOMAIN_ID: domainId,
+        ...(domainId && { SMUS_DOMAIN_ID: domainId }),
         PROJECT_ACCESS_ROLE_ARN: projectAccessRoleArn,
+        ...metadataStoreEnv(metadataStoreTable),
         // Parallel revision writes per worker invocation. Tunable per env.
         BULK_REVIEW_PARALLELISM: "10",
         // Self-continuation: a source larger than one invocation can process
@@ -1851,6 +1887,7 @@ export class SourcesStack extends SCLStack {
     this.sourceScanJobsTable.grantReadWriteData(bulkReviewWorkerFn);
     namespacesTable.grantReadData(bulkReviewWorkerFn);
     projectAccessRole.grantAssumeRole(bulkReviewWorkerFn.role!);
+    metadataStoreTable?.grantReadWriteData(bulkReviewWorkerFn);
     // Self-continuation: the worker re-enqueues to its own queue to page a
     // large source across invocations (#853).
     bulkReviewQueue.grantSendMessages(bulkReviewWorkerFn);
@@ -1915,8 +1952,9 @@ export class SourcesStack extends SCLStack {
           SOURCES_TABLE: this.sourcesTable.tableName,
           NAMESPACES_TABLE: namespacesTableName,
           SOURCE_SCAN_JOBS_TABLE: this.sourceScanJobsTable.tableName,
-          SMUS_DOMAIN_ID: domainId,
+          ...(domainId && { SMUS_DOMAIN_ID: domainId }),
           PROJECT_ACCESS_ROLE_ARN: projectAccessRoleArn,
+          ...metadataStoreEnv(metadataStoreTable),
           // The worker derives the source's catalog name from its id rather than
           // trusting the queue message, the same derivation the API uses, and that
           // derivation needs the same prefix the API is given.
@@ -1955,6 +1993,7 @@ export class SourcesStack extends SCLStack {
     namespacesTable.grantReadData(sourceDeleteWorkerFn);
     this.sourceScanJobsTable.grantReadWriteData(sourceDeleteWorkerFn);
     projectAccessRole.grantAssumeRole(sourceDeleteWorkerFn.role!);
+    metadataStoreTable?.grantReadWriteData(sourceDeleteWorkerFn);
 
     // ================================================================
     // Documents Pipeline — Preprocessing Lambda + KgBuild ECS + SFN
@@ -1971,6 +2010,7 @@ export class SourcesStack extends SCLStack {
           })
         : lambda.DockerImageCode.fromImageAsset(Paths.root, {
             file: "packages/sources/documents/preprocessing/Dockerfile",
+            buildArgs: imageBuildArgs(this),
           });
 
     const preprocessingFn = new lambda.DockerImageFunction(
@@ -2069,7 +2109,7 @@ export class SourcesStack extends SCLStack {
         actions: ["sts:AssumeRole"],
         // Scoped to roles following the platform prefix naming convention.
         resources: [
-          `arn:aws:iam::*:role/${resolveContext(this.node).prefix}-*`,
+          `arn:${this.partition}:iam::*:role/${resolveContext(this.node).prefix}-*`,
         ],
       }),
     );
@@ -2127,29 +2167,37 @@ export class SourcesStack extends SCLStack {
             // linux/amd64`, task def is x86_64. Prevents an arm64 build host
             // from producing an unrunnable arm64 image.
             platform: Platform.LINUX_AMD64,
+            buildArgs: imageBuildArgs(this),
           });
 
-    const batchInferenceRole = new iam.Role(this, "SourcesBatchInferenceRole", {
-      roleName: this.prefixed("sources-doc-bedrock-batch-inference"),
-      assumedBy: new iam.ServicePrincipal("bedrock.amazonaws.com", {
-        conditions: {
-          StringEquals: { "aws:SourceAccount": this.account },
-          ArnLike: {
-            "aws:SourceArn": `arn:aws:bedrock:${this.region}:${this.account}:model-invocation-job/*`,
-          },
-        },
-      }),
-    });
-    sourcesBucket.grantReadWrite(batchInferenceRole);
-    batchInferenceRole.addToPolicy(
-      new iam.PolicyStatement({
-        actions: ["bedrock:InvokeModel"],
-        resources: [
-          `arn:aws:bedrock:*::foundation-model/*`,
-          `arn:aws:bedrock:*:${this.account}:inference-profile/*`,
-        ],
-      }),
-    );
+    // Bedrock batch inference runs jobs in this region and reads/writes this
+    // stack's bucket, so it needs in-region Bedrock. Cross-region Bedrock (AWS
+    // China, which also rejects the bedrock.amazonaws.com principal) skips it.
+    const batchInferenceRole = bedrockGuardrails
+      ? new iam.Role(this, "SourcesBatchInferenceRole", {
+          roleName: this.prefixed("sources-doc-bedrock-batch-inference"),
+          assumedBy: new iam.ServicePrincipal("bedrock.amazonaws.com", {
+            conditions: {
+              StringEquals: { "aws:SourceAccount": this.account },
+              ArnLike: {
+                "aws:SourceArn": `arn:${this.partition}:bedrock:${this.region}:${this.account}:model-invocation-job/*`,
+              },
+            },
+          }),
+        })
+      : undefined;
+    if (batchInferenceRole) {
+      sourcesBucket.grantReadWrite(batchInferenceRole);
+      batchInferenceRole.addToPolicy(
+        new iam.PolicyStatement({
+          actions: ["bedrock:InvokeModel"],
+          resources: [
+            `arn:${this.partition}:bedrock:*::foundation-model/*`,
+            `arn:${this.partition}:bedrock:*:${this.account}:inference-profile/*`,
+          ],
+        }),
+      );
+    }
 
     kgBuildTaskDef.addContainer("SourcesKgBuildContainer", {
       containerName: this.prefixed("sources-doc-kg-build"),
@@ -2159,7 +2207,9 @@ export class SourcesStack extends SCLStack {
         DOC_SOURCES_TABLE: this.sourcesTable.tableName,
         NEPTUNE_ENDPOINT: neptuneEndpoint,
         OPENSEARCH_ENDPOINT: opensearchEndpoint,
-        BATCH_INFERENCE_ROLE_ARN: batchInferenceRole.roleArn,
+        ...(batchInferenceRole && {
+          BATCH_INFERENCE_ROLE_ARN: batchInferenceRole.roleArn,
+        }),
         // ECS does not inject a region into task containers, so without this
         // resolve_region() falls back to us-east-1 and the ingestion-time
         // ApplyGuardrail call below targets the wrong region — DENIED by the
@@ -2176,16 +2226,23 @@ export class SourcesStack extends SCLStack {
         BEDROCK_EMBED_DIMENSIONS: embedDimensions,
         BEDROCK_CHAT_MODEL_ID: chatModelId,
         // Content screening: retrieval guardrail for ingestion-time ApplyGuardrail
-        // (SDO-188). Empty string disables screening gracefully.
-        RETRIEVAL_GUARDRAIL_ID: ssm.StringParameter.valueForStringParameter(
-          this,
-          `${ssmPrefix}/bedrock/retrieval-guardrail-id`,
-        ),
-        RETRIEVAL_GUARDRAIL_VERSION:
-          ssm.StringParameter.valueForStringParameter(
-            this,
-            `${ssmPrefix}/bedrock/retrieval-guardrail-version`,
-          ),
+        // (SDO-188). Empty string disables screening gracefully. There is no
+        // GuardrailStack (hence no SSM params) on llm_provider=openai_compatible
+        // or cross-region Bedrock.
+        ...(bedrockGuardrails
+          ? {
+              RETRIEVAL_GUARDRAIL_ID:
+                ssm.StringParameter.valueForStringParameter(
+                  this,
+                  `${ssmPrefix}/bedrock/retrieval-guardrail-id`,
+                ),
+              RETRIEVAL_GUARDRAIL_VERSION:
+                ssm.StringParameter.valueForStringParameter(
+                  this,
+                  `${ssmPrefix}/bedrock/retrieval-guardrail-version`,
+                ),
+            }
+          : { RETRIEVAL_GUARDRAIL_ID: "", RETRIEVAL_GUARDRAIL_VERSION: "" }),
         // Smaller bulk embedding writes so each AOSS _bulk request reserves less
         // JVM heap — avoids tripping the NEXTGEN parent circuit breaker
         // (429 circuit_breaking_exception) on large doc corpora at low OCU.
@@ -2204,6 +2261,9 @@ export class SourcesStack extends SCLStack {
         // batch-write retry ladder but is very verbose; raise it temporarily when
         // diagnosing write contention, don't leave it on.
         DEPENDENCY_LOG_LEVEL: "INFO",
+        // BEDROCK_* access settings (cross-region Bedrock), or LLM_PROVIDER /
+        // OPENAI_COMPAT_* when llm_provider=openai_compatible.
+        ...llmProviderEnv(this),
       },
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: "sources-doc-kg-build",
@@ -2213,6 +2273,7 @@ export class SourcesStack extends SCLStack {
 
     sourcesBucket.grantReadWrite(kgBuildTaskDef.taskRole);
     this.sourcesTable.grantReadWriteData(kgBuildTaskDef.taskRole);
+    grantLlmProviderSecret(this, kgBuildTaskDef.taskRole);
     kgBuildTaskDef.taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         actions: [
@@ -2225,18 +2286,28 @@ export class SourcesStack extends SCLStack {
         resources: [neptuneClusterArn],
       }),
     );
-    kgBuildTaskDef.taskRole.addToPrincipalPolicy(
-      new iam.PolicyStatement({
-        actions: ["aoss:APIAccessAll"],
-        resources: [opensearchCollectionArn],
-      }),
-    );
+    // vector_store=opensearch: a managed domain needs only the IAM grant.
+    const aossVectorStore = resolveVectorStore(this) === "aoss";
+    if (aossVectorStore) {
+      kgBuildTaskDef.taskRole.addToPrincipalPolicy(
+        new iam.PolicyStatement({
+          actions: ["aoss:APIAccessAll"],
+          resources: [opensearchCollectionArn],
+        }),
+      );
+    } else {
+      grantVectorStoreDomain(
+        this,
+        kgBuildTaskDef.taskRole,
+        VECTOR_STORE_WRITE_ACTIONS,
+      );
+    }
     kgBuildTaskDef.taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         actions: ["bedrock:InvokeModel"],
         resources: [
-          `arn:aws:bedrock:*::foundation-model/*`,
-          `arn:aws:bedrock:*:${this.account}:inference-profile/*`,
+          `arn:${this.partition}:bedrock:*::foundation-model/*`,
+          `arn:${this.partition}:bedrock:*:${this.account}:inference-profile/*`,
         ],
       }),
     );
@@ -2245,7 +2316,7 @@ export class SourcesStack extends SCLStack {
       new iam.PolicyStatement({
         actions: ["bedrock:ApplyGuardrail"],
         resources: [
-          `arn:aws:bedrock:${this.region}:${this.account}:guardrail/*`,
+          `arn:${this.partition}:bedrock:${this.region}:${this.account}:guardrail/*`,
         ],
       }),
     );
@@ -2260,72 +2331,76 @@ export class SourcesStack extends SCLStack {
         },
       }),
     );
-    // Bedrock batch job actions scoped to the same model ARN patterns as InvokeModel above.
-    // Prevents launching batch jobs against arbitrary models or stopping jobs from other workloads.
-    kgBuildTaskDef.taskRole.addToPrincipalPolicy(
-      new iam.PolicyStatement({
-        actions: [
-          "bedrock:CreateModelInvocationJob",
-          "bedrock:GetModelInvocationJob",
-          "bedrock:ListModelInvocationJobs",
-          "bedrock:StopModelInvocationJob",
-        ],
-        resources: [
-          `arn:aws:bedrock:*::foundation-model/*`,
-          `arn:aws:bedrock:*:${this.account}:inference-profile/*`,
-        ],
-      }),
-    );
-    kgBuildTaskDef.taskRole.addToPrincipalPolicy(
-      new iam.PolicyStatement({
-        actions: ["iam:PassRole"],
-        resources: [batchInferenceRole.roleArn],
-        conditions: {
-          StringEquals: { "iam:PassedToService": "bedrock.amazonaws.com" },
-        },
-      }),
-    );
+    if (batchInferenceRole) {
+      // Bedrock batch job actions scoped to the same model ARN patterns as InvokeModel above.
+      // Prevents launching batch jobs against arbitrary models or stopping jobs from other workloads.
+      kgBuildTaskDef.taskRole.addToPrincipalPolicy(
+        new iam.PolicyStatement({
+          actions: [
+            "bedrock:CreateModelInvocationJob",
+            "bedrock:GetModelInvocationJob",
+            "bedrock:ListModelInvocationJobs",
+            "bedrock:StopModelInvocationJob",
+          ],
+          resources: [
+            `arn:${this.partition}:bedrock:*::foundation-model/*`,
+            `arn:${this.partition}:bedrock:*:${this.account}:inference-profile/*`,
+          ],
+        }),
+      );
+      kgBuildTaskDef.taskRole.addToPrincipalPolicy(
+        new iam.PolicyStatement({
+          actions: ["iam:PassRole"],
+          resources: [batchInferenceRole.roleArn],
+          conditions: {
+            StringEquals: { "iam:PassedToService": "bedrock.amazonaws.com" },
+          },
+        }),
+      );
+    }
 
     // ── AOSS Data Access Policy ──────────────────────────────────────
-    new opensearchserverless.CfnAccessPolicy(
-      this,
-      "SourcesOSSDataAccessPolicy",
-      {
-        name: this.prefixed("src-ingestion-access"),
-        type: "data",
-        policy: JSON.stringify([
-          {
-            Rules: [
-              {
-                ResourceType: "index",
-                Resource: [`index/${opensearchCollectionName}/*`],
-                Permission: [
-                  "aoss:CreateIndex",
-                  "aoss:UpdateIndex",
-                  "aoss:DescribeIndex",
-                  "aoss:DeleteIndex",
-                  "aoss:ReadDocument",
-                  "aoss:WriteDocument",
-                ],
-              },
-              {
-                ResourceType: "collection",
-                Resource: [`collection/${opensearchCollectionName}`],
-                Permission: [
-                  "aoss:CreateCollectionItems",
-                  "aoss:DescribeCollectionItems",
-                  "aoss:UpdateCollectionItems",
-                ],
-              },
-            ],
-            Principal: [
-              kgBuildTaskDef.taskRole.roleArn,
-              `arn:aws:iam::${this.account}:root`,
-            ],
-          },
-        ]),
-      },
-    );
+    if (aossVectorStore) {
+      new opensearchserverless.CfnAccessPolicy(
+        this,
+        "SourcesOSSDataAccessPolicy",
+        {
+          name: this.prefixed("src-ingestion-access"),
+          type: "data",
+          policy: JSON.stringify([
+            {
+              Rules: [
+                {
+                  ResourceType: "index",
+                  Resource: [`index/${opensearchCollectionName}/*`],
+                  Permission: [
+                    "aoss:CreateIndex",
+                    "aoss:UpdateIndex",
+                    "aoss:DescribeIndex",
+                    "aoss:DeleteIndex",
+                    "aoss:ReadDocument",
+                    "aoss:WriteDocument",
+                  ],
+                },
+                {
+                  ResourceType: "collection",
+                  Resource: [`collection/${opensearchCollectionName}`],
+                  Permission: [
+                    "aoss:CreateCollectionItems",
+                    "aoss:DescribeCollectionItems",
+                    "aoss:UpdateCollectionItems",
+                  ],
+                },
+              ],
+              Principal: [
+                kgBuildTaskDef.taskRole.roleArn,
+                `arn:${this.partition}:iam::${this.account}:root`,
+              ],
+            },
+          ]),
+        },
+      );
+    }
 
     // ── Documents Ingestion Step Functions ───────────────────────────
     const makeDocStatusUpdate = (
@@ -2911,8 +2986,9 @@ export class SourcesStack extends SCLStack {
         BUCKET_NAME: sourcesBucket.bucketName,
         DELETION_STATE_MACHINE_ARN: docDeletionStateMachine.stateMachineArn,
         ALLOWED_ORIGIN: allowedOrigin,
-        SMUS_DOMAIN_ID: domainId,
+        ...(domainId && { SMUS_DOMAIN_ID: domainId }),
         PROJECT_ACCESS_ROLE_ARN: projectAccessRoleArn,
+        ...metadataStoreEnv(metadataStoreTable),
         FEDERATION_PROVISIONER_ROLE_ARN: federationProvisionerFn.role!.roleArn,
         // Feeds `_build_catalog_name`, which derives the per-source Athena
         // data-catalog name registered at source create. Without it the handler
@@ -2983,21 +3059,24 @@ export class SourcesStack extends SCLStack {
     sourceDeleteQueue.grantSendMessages(sourcesApiFn);
     docDeletionStateMachine.grantStartExecution(sourcesApiFn);
     projectAccessRole.grantAssumeRole(sourcesApiFn.role!);
+    metadataStoreTable?.grantReadWriteData(sourcesApiFn);
 
     // DataZone Search/Get/Delete for tables tab and source deletion
-    sourcesApiFn.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: [
-          "datazone:Search",
-          "datazone:GetAsset",
-          "datazone:DeleteAsset",
-        ],
-        resources: [
-          `arn:aws:datazone:${this.region}:${this.account}:domain/${domainId}`,
-          `arn:aws:datazone:${this.region}:${this.account}:domain/${domainId}/*`,
-        ],
-      }),
-    );
+    if (domainId) {
+      sourcesApiFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: [
+            "datazone:Search",
+            "datazone:GetAsset",
+            "datazone:DeleteAsset",
+          ],
+          resources: [
+            `arn:${this.partition}:datazone:${this.region}:${this.account}:domain/${domainId}`,
+            `arn:${this.partition}:datazone:${this.region}:${this.account}:domain/${domainId}/*`,
+          ],
+        }),
+      );
+    }
 
     // Federation teardown on delete-source runs under the federation
     // provisioner's Lake Formation admin role, which sources-api assumes (see
@@ -3027,8 +3106,8 @@ export class SourcesStack extends SCLStack {
         sid: "GlueOwnershipTagRead",
         actions: ["glue:GetTags", "glue:GetDatabase"],
         resources: [
-          `arn:aws:glue:${this.region}:${this.account}:catalog`,
-          `arn:aws:glue:${this.region}:${this.account}:database/*`,
+          `arn:${this.partition}:glue:${this.region}:${this.account}:catalog`,
+          `arn:${this.partition}:glue:${this.region}:${this.account}:database/*`,
         ],
       }),
     );
@@ -3059,7 +3138,7 @@ export class SourcesStack extends SCLStack {
           "athena:GetDataCatalog",
         ],
         resources: [
-          `arn:aws:athena:${this.region}:${this.account}:datacatalog/${fedResourcePrefix}*`,
+          `arn:${this.partition}:athena:${this.region}:${this.account}:datacatalog/${fedResourcePrefix}*`,
         ],
       }),
     );
@@ -3080,7 +3159,7 @@ export class SourcesStack extends SCLStack {
         sid: "AthenaDataCatalogTagging",
         actions: ["athena:TagResource", "athena:ListTagsForResource"],
         resources: [
-          `arn:aws:athena:${this.region}:${this.account}:datacatalog/${fedResourcePrefix}*`,
+          `arn:${this.partition}:athena:${this.region}:${this.account}:datacatalog/${fedResourcePrefix}*`,
         ],
       }),
     );
@@ -3118,7 +3197,7 @@ export class SourcesStack extends SCLStack {
         sid: "DatabricksSourceConfigWrite",
         actions: ["ssm:PutParameter", "ssm:DeleteParameter"],
         resources: [
-          `arn:aws:ssm:${this.region}:${this.account}:parameter${databricksSourcesConfigPrefix}/*`,
+          `arn:${this.partition}:ssm:${this.region}:${this.account}:parameter${databricksSourcesConfigPrefix}/*`,
         ],
       }),
     );
@@ -3134,7 +3213,7 @@ export class SourcesStack extends SCLStack {
         sid: "ReadDatabricksConnectorArnParam",
         actions: ["ssm:GetParameter"],
         resources: [
-          `arn:aws:ssm:${this.region}:${this.account}:parameter${databricksConnectorArnParamName}`,
+          `arn:${this.partition}:ssm:${this.region}:${this.account}:parameter${databricksConnectorArnParamName}`,
         ],
       }),
     );
@@ -3371,7 +3450,9 @@ export class SourcesStack extends SCLStack {
         // on the discovery/federated roles, so a same-account secret in another
         // region can still be verified at registration (the binding check calls
         // DescribeSecret in the secret's own region).
-        resources: [`arn:aws:secretsmanager:*:${this.account}:secret:*`],
+        resources: [
+          `arn:${this.partition}:secretsmanager:*:${this.account}:secret:*`,
+        ],
       }),
     );
 
@@ -4076,7 +4157,7 @@ export class SourcesStack extends SCLStack {
       sid,
       actions: ["sts:AssumeRole"],
       resources: [
-        `arn:aws:iam::*:role/${this.prefixed(RESERVED_DATASOURCE_ROLE_SEGMENT)}*`,
+        `arn:${this.partition}:iam::*:role/${this.prefixed(RESERVED_DATASOURCE_ROLE_SEGMENT)}*`,
       ],
       conditions: {
         Null: { "sts:ExternalId": "false" },

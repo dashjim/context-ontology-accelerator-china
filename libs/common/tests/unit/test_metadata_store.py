@@ -10,6 +10,7 @@ from botocore.exceptions import ClientError
 from coa_common.metadata_store import (
     MetadataStoreClient,
     MetadataStoreError,
+    MetadataStoreNotFoundError,
     ProjectResult,
     SMUSClient,
 )
@@ -129,6 +130,31 @@ class TestDeleteProject:
         client = SMUSClient(domain_id=DOMAIN)
         with pytest.raises(MetadataStoreError, match="Failed to delete"):
             client.delete_project(project_id="proj_abc")
+
+    @patch("coa_common.metadata_store.smus.boto3")
+    def test_force_skips_deletion_check(self, mock_boto3):
+        mock_dz = MagicMock()
+        mock_boto3.client.return_value = mock_dz
+
+        SMUSClient(domain_id=DOMAIN).delete_project(project_id="proj_abc", force=True)
+
+        mock_dz.delete_project.assert_called_once_with(
+            domainIdentifier=DOMAIN,
+            identifier="proj_abc",
+            skipDeletionCheck=True,
+        )
+
+    @patch("coa_common.metadata_store.smus.boto3")
+    def test_not_found_raises_not_found_error(self, mock_boto3):
+        mock_dz = MagicMock()
+        mock_dz.delete_project.side_effect = ClientError(
+            {"Error": {"Code": "ResourceNotFoundException", "Message": "gone"}},
+            "DeleteProject",
+        )
+        mock_boto3.client.return_value = mock_dz
+
+        with pytest.raises(MetadataStoreNotFoundError):
+            SMUSClient(domain_id=DOMAIN).delete_project(project_id="proj_abc")
 
 
 @pytest.mark.unit

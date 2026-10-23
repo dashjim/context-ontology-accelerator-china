@@ -480,7 +480,7 @@ const initialModel: Model = {
 function validateCrossAccountRoleArn(arn: string): string | undefined {
   if (!arn.trim()) return undefined; // optional field
   const roleArnPattern =
-    /^arn:aws:iam::\d{12}:role\/[a-zA-Z0-9_+=,.@-]+-datasource-access-[a-zA-Z0-9_+=,.@-]+$/;
+    /^arn:(aws|aws-cn|aws-us-gov):iam::\d{12}:role\/[a-zA-Z0-9_+=,.@-]+-datasource-access-[a-zA-Z0-9_+=,.@-]+$/;
   if (!roleArnPattern.test(arn.trim())) {
     return "Role ARN must match pattern: arn:aws:iam::ACCOUNT:role/{prefix}-datasource-access-*";
   }
@@ -563,7 +563,7 @@ const DATABRICKS_HTTP_PATH_RE =
 // Unity Catalog catalog and schema are both plain SQL identifiers.
 const DATABRICKS_IDENTIFIER_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 const SECRET_ARN_RE =
-  /^arn:(aws|aws-us-gov):secretsmanager:[a-z0-9-]+:\d{12}:secret:.+$/;
+  /^arn:(aws|aws-cn|aws-us-gov):secretsmanager:[a-z0-9-]+:\d{12}:secret:.+$/;
 
 /**
  * Validate a connector Lambda function ARN.

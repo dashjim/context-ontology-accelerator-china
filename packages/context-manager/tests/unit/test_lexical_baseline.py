@@ -88,6 +88,30 @@ class TestBaselineLexicalRetrieverInit:
             # Mirrors kg-build's EMBEDDING_INDEXES default (chunk,topic).
             assert "statement" not in v_kwargs["index_names"]
 
+    @pytest.mark.parametrize(
+        ("vector_store_uri", "endpoint"),
+        [
+            ("aoss://https://mytest.aoss.amazonaws.com", "https://mytest.aoss.amazonaws.com"),
+            (
+                "aoss://https://vpc-d-x.cn-north-1.es.amazonaws.com.cn",
+                "https://vpc-d-x.cn-north-1.es.amazonaws.com.cn",
+            ),
+        ],
+    )
+    def test_get_engine_signs_graphrag_for_the_endpoint(self, vector_store_uri, endpoint):
+        """graphrag is re-signed for the endpoint (``es`` on a managed domain) before the store opens."""
+        retriever = BaselineLexicalRetriever(
+            graph_store_uri="neptune-graph://g-mytest", vector_store_uri=vector_store_uri
+        )
+        with (
+            patch("coa_common.opensearch.patch_graphrag_signing_service") as mock_patch,
+            patch("graphrag_toolkit.lexical_graph.storage.GraphStoreFactory"),
+            patch("graphrag_toolkit.lexical_graph.storage.VectorStoreFactory"),
+            patch("graphrag_toolkit.lexical_graph.LexicalGraphQueryEngine"),
+        ):
+            retriever._get_engine("550e8400-e29b-41d4-a716-446655440000", DEFAULT_SPEC)
+        mock_patch.assert_called_once_with(endpoint)
+
     def test_engine_cached_per_tenant_id(self):
         """Engine is built once per tenant_id and reused on subsequent calls."""
         retriever = BaselineLexicalRetriever(

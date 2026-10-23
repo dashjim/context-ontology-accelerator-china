@@ -5,6 +5,15 @@
 # python:3.12-slim, digest resolved from the tag on 2026-09-01.
 FROM --platform=linux/amd64 public.ecr.aws/docker/library/python:3.12-slim@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f
 
+# Optional package-mirror overrides for builds on hosts where the public
+# indexes are slow or unreachable (e.g. AWS China), passed by CDK as build args
+# from the build_* context keys. The defaults keep the stock sources: an empty
+# APT_MIRROR leaves the Debian sources untouched, and pip already defaults to
+# https://pypi.org/simple. Build args are visible to RUN as environment
+# variables but are not persisted in the image.
+ARG APT_MIRROR=
+ARG PIP_INDEX_URL=https://pypi.org/simple
+
 WORKDIR /app
 
 # Apply Debian security patches on top of the pinned base. This image installs no
@@ -12,7 +21,11 @@ WORKDIR /app
 # whatever the pinned base shipped — which is how it ended up on openssl
 # 3.5.6-1~deb13u2 with 10 open Inspector findings. `upgrade` (not `dist-upgrade`)
 # keeps this to security and point-release updates from the trixie suites only.
-RUN apt-get update && \
+RUN if [ -n "$APT_MIRROR" ]; then \
+      sed -i "s|http://deb.debian.org/|https://${APT_MIRROR}/|g" /etc/apt/sources.list.d/debian.sources && \
+      grep -q "https://${APT_MIRROR}/" /etc/apt/sources.list.d/debian.sources; \
+    fi && \
+    apt-get update && \
     apt-get upgrade -y && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 

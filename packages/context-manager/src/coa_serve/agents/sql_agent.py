@@ -41,11 +41,14 @@ therefore not offered — see the note on ``invoke_async`` below.
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
 import structlog
+from coa_common.bedrock_access import map_bedrock_model_id, prepare_bedrock_client
+from coa_common.llm_provider import is_openai_compatible
 
 from ..config import env_with_legacy_name
 from ..exceptions import AccessDeniedError
@@ -210,6 +213,26 @@ def _record_strands_usage(agent: object) -> None:
             )
     except Exception:
         logger.debug("agentic_usage_capture_failed")
+
+
+def _openai_compatible_model(model_cls: Any, model_id: str | None) -> Any:
+    """Build the Strands OpenAI provider on the OpenAI-compatible endpoint.
+
+    For ``LLM_PROVIDER=openai_compatible`` (regions without Bedrock). Tool calling
+    goes over the OpenAI ``tools`` / ``tool_calls`` wire format, so the endpoint's
+    model must support function calling. With no request model the default is
+    ``BEDROCK_MODEL_ID``, as on the serve LLM client; either is mapped via
+    ``OPENAI_COMPAT_MODEL_MAP`` / ``OPENAI_COMPAT_CHAT_MODEL``.
+    """
+    from coa_common.openai_compat import load_settings, sdk_api_key
+
+    settings = load_settings()
+    requested = model_id or os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-5")
+    return model_cls(
+        client_args={"base_url": settings.base_url, "api_key": sdk_api_key(settings)},
+        model_id=settings.resolve_chat_model(requested),
+        params={"max_tokens": _AGENT_MAX_TOKENS},
+    )
 
 
 @dataclass
@@ -377,9 +400,14 @@ class SqlAgent:
             AccessDeniedError: Propagated if raised beneath the agent loop.
         """
         t_start = time.perf_counter()
+        openai_compatible = is_openai_compatible()
         try:
             from strands import Agent, tool
-            from strands.models import BedrockModel
+
+            if openai_compatible:
+                from strands.models.openai import OpenAIModel
+            else:
+                from strands.models import BedrockModel
         except ImportError as e:  # pragma: no cover - dependency always present in the runtime image
             logger.warning("agentic_strands_unavailable", error=str(e))
             return SqlAgentOutcome(unavailable=True, duration_ms=int((time.perf_counter() - t_start) * 1000))
@@ -632,17 +660,29 @@ class SqlAgent:
                 {"row_count": result.row_count, "columns": result.columns, "preview": preview}, default=str
             )
 
-        # BedrockModel uses the same region as the serve LLM client + the request's model.
-        model_kwargs: dict[str, Any] = {"region_name": self._region, "max_tokens": _AGENT_MAX_TOKENS}
-        if self._model_id:
-            model_kwargs["model_id"] = self._model_id
+        model: Any
+        if openai_compatible:
+            model = _openai_compatible_model(OpenAIModel, self._model_id)
+        else:
+            # BedrockModel uses the same region as the serve LLM client + the request's model.
+            model_kwargs: dict[str, Any] = {
+                "region_name": prepare_bedrock_client(self._region),
+                "max_tokens": _AGENT_MAX_TOKENS,
+            }
+            if self._model_id:
+                model_kwargs["model_id"] = self._model_id
+            model = BedrockModel(**model_kwargs)
+            # Mapped after construction so Strands' own default model id is covered too.
+            mapped_model_id = map_bedrock_model_id(model.config["model_id"])
+            if mapped_model_id != model.config["model_id"]:
+                model.update_config(model_id=mapped_model_id)
         # The graph tool is offered ONLY when one is wired: with no graph client the
         # agent sees the same four tools and the same prompt text as baseline.
         tools = [search_tables, get_table_schema, generate_sql, execute_sql]
         if self._graph is not None:
             tools.insert(2, explore_graph)
         agent = Agent(
-            model=BedrockModel(**model_kwargs),
+            model=model,
             tools=tools,
             system_prompt=build_system_prompt(self._intent_review),
         )

@@ -497,7 +497,7 @@ describe("ConnectSource — cross-account IAM role validation", () => {
   function validateCrossAccountRoleArn(arn: string): string | undefined {
     if (!arn.trim()) return undefined;
     const roleArnPattern =
-      /^arn:aws:iam::\d{12}:role\/[a-zA-Z0-9_+=,.@-]+-datasource-access-[a-zA-Z0-9_+=,.@-]+$/;
+      /^arn:(aws|aws-cn|aws-us-gov):iam::\d{12}:role\/[a-zA-Z0-9_+=,.@-]+-datasource-access-[a-zA-Z0-9_+=,.@-]+$/;
     if (!roleArnPattern.test(arn.trim())) {
       return "Role ARN must match pattern: arn:aws:iam::ACCOUNT:role/{prefix}-datasource-access-*";
     }
@@ -518,6 +518,14 @@ describe("ConnectSource — cross-account IAM role validation", () => {
     expect(
       validateCrossAccountRoleArn(
         "arn:aws:iam::222222222222:role/coa-dev-datasource-access-glue-catalog",
+      ),
+    ).toBeUndefined();
+  });
+
+  it("accepts a role ARN in the China partition", () => {
+    expect(
+      validateCrossAccountRoleArn(
+        "arn:aws-cn:iam::123456789012:role/coa-dev-datasource-access-acme",
       ),
     ).toBeUndefined();
   });

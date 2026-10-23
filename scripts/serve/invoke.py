@@ -112,7 +112,8 @@ def main():
 
     # Invoke
     encoded_arn = urllib.parse.quote(runtime_arn, safe="")
-    url = f"https://bedrock-agentcore.{rgn}.amazonaws.com/runtimes/{encoded_arn}/invocations?qualifier=DEFAULT"
+    suffix = "amazonaws.com.cn" if rgn.startswith("cn-") else "amazonaws.com"
+    url = f"https://bedrock-agentcore.{rgn}.{suffix}/runtimes/{encoded_arn}/invocations?qualifier=DEFAULT"
     payload.setdefault("requestId", str(uuid.uuid4()))
     body = json.dumps(payload).encode()
     req = urllib.request.Request(

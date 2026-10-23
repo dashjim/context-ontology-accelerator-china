@@ -80,6 +80,10 @@ class TestExtractBearerToken:
 
 
 class TestCognitoTokenAuthorizer:
+    def test_china_region_issuer_uses_cn_dns_suffix(self):
+        authorizer = CognitoTokenAuthorizer(user_pool_id="cn-north-1_TestPool", region="cn-north-1")
+        assert authorizer._issuer == "https://cognito-idp.cn-north-1.amazonaws.com.cn/cn-north-1_TestPool"
+
     def test_validate_success(self, _make_token, jwks_response):
         claims = {
             "sub": "user-123",

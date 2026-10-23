@@ -56,7 +56,7 @@ export class ReservedRoleNamePrefix implements cdk.IAspect {
           : `"${arnSuffix}" falls under`
       } the reserved datasource-access prefix "${this.reservedPrefix}" ` +
         `(${node.node.path}). This connector's sts:AssumeRole grant is scoped to ` +
-        `arn:aws:iam::*:role/${this.reservedPrefix}* with no account restriction, so a role of ` +
+        `arn:<partition>:iam::*:role/${this.reservedPrefix}* with no account restriction, so a role of ` +
         `COA's own here would be assumable by the connector. Rename it, or move it off that IAM path.`,
     );
   }

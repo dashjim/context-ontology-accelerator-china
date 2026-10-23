@@ -944,6 +944,136 @@ class TestGraphRAGConfig:
 
         assert _llm_kwargs(_cfg.extraction_llm)["timeout"] == 900.0
 
+    @patch("graphrag_toolkit.lexical_graph.indexing.build.Checkpoint")
+    @patch("graphrag_toolkit.lexical_graph.storage.VectorStoreFactory")
+    @patch("graphrag_toolkit.lexical_graph.storage.GraphStoreFactory")
+    @patch("graphrag_toolkit.lexical_graph.LexicalGraphIndex")
+    @patch("graphrag_toolkit.lexical_graph.GraphRAGConfig")
+    def test_signing_patch_gets_the_opensearch_endpoint(
+        self, _cfg, mock_idx_cls, mock_gsf, mock_vsf, _ckpt, monkeypatch, mod
+    ):
+        """graphrag must sign for a managed domain ("es") before it opens the vector store."""
+        endpoint = "vpc-d-abc.cn-north-1.es.amazonaws.com.cn"
+        monkeypatch.setenv("OPENSEARCH_ENDPOINT", endpoint)
+        _setup_graphrag_mocks(mock_gsf, mock_vsf, mock_idx_cls)
+
+        with patch.object(mod, "patch_graphrag_signing_service") as mock_patch:
+            mod._setup_graphrag("tenant-x")
+
+        mock_patch.assert_called_once_with(endpoint)
+
+    @patch("graphrag_toolkit.lexical_graph.indexing.build.Checkpoint")
+    @patch("graphrag_toolkit.lexical_graph.storage.VectorStoreFactory")
+    @patch("graphrag_toolkit.lexical_graph.storage.GraphStoreFactory")
+    @patch("graphrag_toolkit.lexical_graph.LexicalGraphIndex")
+    @patch("graphrag_toolkit.lexical_graph.GraphRAGConfig")
+    def test_extraction_llm_honours_bedrock_region_and_model_map(
+        self, _cfg, mock_idx_cls, mock_gsf, mock_vsf, _ckpt, monkeypatch, mod
+    ):
+        """AWS China: the ARN the trigger builds is remapped and Bedrock is called in BEDROCK_REGION.
+
+        GraphRAGConfig.aws_region stays the deployment region (it signs OpenSearch/Neptune).
+        """
+        arn = "arn:aws-cn:bedrock:cn-north-1:1:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0"
+        monkeypatch.setattr(mod, "BEDROCK_MODEL_ARN", arn)
+        monkeypatch.setenv("BEDROCK_REGION", "us-east-1")
+        monkeypatch.setenv("BEDROCK_MODEL_DEFAULT", "openai.gpt-oss-120b-1:0")
+        _setup_graphrag_mocks(mock_gsf, mock_vsf, mock_idx_cls)
+
+        mod._setup_graphrag("tenant-x")
+
+        assigned = _llm_kwargs(_cfg.extraction_llm)
+        assert assigned["model"] == "openai.gpt-oss-120b-1:0"
+        assert assigned["region_name"] == "us-east-1"
+        assert _cfg.aws_region == mod.AWS_REGION
+
+
+class TestOpenAICompatExtractionLLM:
+    """LLM_PROVIDER=openai_compatible: the extraction LLM is OpenAILike, never BedrockConverse."""
+
+    @pytest.fixture()
+    def openai_env(self, monkeypatch):
+        from coa_common import openai_compat
+
+        pytest.importorskip("llama_index.llms.openai_like")
+        monkeypatch.setenv("LLM_PROVIDER", "openai_compatible")
+        monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "https://llm.example.test/v1")
+        monkeypatch.setenv(
+            "OPENAI_COMPAT_MODEL_MAP", json.dumps({"arn:aws:bedrock:us-east-1:1:inference-profile/m": "deepseek-chat"})
+        )
+        monkeypatch.setenv("OPENAI_COMPAT_CHAT_MODEL", "qwen-plus")
+        monkeypatch.delenv("OPENAI_COMPAT_API_KEY_SECRET_ARN", raising=False)
+        monkeypatch.delenv("EXTRACTION_MODEL", raising=False)
+        openai_compat.load_settings.cache_clear()
+        yield
+        openai_compat.load_settings.cache_clear()
+
+    @patch("graphrag_toolkit.lexical_graph.indexing.build.Checkpoint")
+    @patch("graphrag_toolkit.lexical_graph.storage.VectorStoreFactory")
+    @patch("graphrag_toolkit.lexical_graph.storage.GraphStoreFactory")
+    @patch("graphrag_toolkit.lexical_graph.LexicalGraphIndex")
+    @patch("graphrag_toolkit.lexical_graph.GraphRAGConfig")
+    def test_extraction_llm_is_openai_like_with_the_same_bounds(
+        self, _cfg, mock_idx_cls, mock_gsf, mock_vsf, _ckpt, openai_env, monkeypatch, mod
+    ):
+        import pickle
+
+        from llama_index.llms.openai_like import OpenAILike
+
+        monkeypatch.setattr(mod, "BEDROCK_MODEL_ARN", "arn:aws:bedrock:us-east-1:1:inference-profile/m")
+        _setup_graphrag_mocks(mock_gsf, mock_vsf, mock_idx_cls)
+
+        mod._setup_graphrag("tenant-x")
+
+        llm = _cfg.extraction_llm
+        assert type(llm) is OpenAILike
+        assert llm.model == "deepseek-chat"  # the Bedrock model id, mapped
+        assert llm.api_base == "https://llm.example.test/v1" and llm.is_chat_model
+        assert llm.temperature == 0.0
+        assert llm.max_tokens == mod.EXTRACTION_MAX_TOKENS == 16384
+        assert llm.timeout == mod.EXTRACTION_TIMEOUT_SECONDS == 300.0
+        assert llm.max_retries == mod.EXTRACTION_MAX_ATTEMPTS
+        # Pickled to the ProcessPool workers: the settings must survive the hop.
+        clone = pickle.loads(pickle.dumps(llm))
+        assert (clone.model, clone.api_base, clone.max_tokens, clone.timeout, clone.max_retries) == (
+            llm.model,
+            llm.api_base,
+            llm.max_tokens,
+            llm.timeout,
+            llm.max_retries,
+        )
+
+    @patch("graphrag_toolkit.lexical_graph.indexing.build.Checkpoint")
+    @patch("graphrag_toolkit.lexical_graph.storage.VectorStoreFactory")
+    @patch("graphrag_toolkit.lexical_graph.storage.GraphStoreFactory")
+    @patch("graphrag_toolkit.lexical_graph.LexicalGraphIndex")
+    @patch("graphrag_toolkit.lexical_graph.GraphRAGConfig")
+    def test_extraction_llm_is_set_even_without_a_model_arn(
+        self, _cfg, mock_idx_cls, mock_gsf, mock_vsf, _ckpt, openai_env, monkeypatch, mod
+    ):
+        # With no ARN the Bedrock path leaves the toolkit default (a BedrockConverse);
+        # here that would call Bedrock, so an instance is always assigned.
+        monkeypatch.setattr(mod, "BEDROCK_MODEL_ARN", None)
+        _setup_graphrag_mocks(mock_gsf, mock_vsf, mock_idx_cls)
+
+        mod._setup_graphrag("tenant-x")
+
+        assert _cfg.extraction_llm.model == "qwen-plus"  # OPENAI_COMPAT_CHAT_MODEL
+
+    @patch("graphrag_toolkit.lexical_graph.indexing.build.Checkpoint")
+    @patch("graphrag_toolkit.lexical_graph.storage.VectorStoreFactory")
+    @patch("graphrag_toolkit.lexical_graph.storage.GraphStoreFactory")
+    @patch("graphrag_toolkit.lexical_graph.LexicalGraphIndex")
+    @patch("graphrag_toolkit.lexical_graph.GraphRAGConfig")
+    def test_batch_inference_is_rejected(
+        self, _cfg, mock_idx_cls, mock_gsf, mock_vsf, _ckpt, openai_env, monkeypatch, mod
+    ):
+        monkeypatch.setattr(mod, "USE_BATCH_INFERENCE", True)
+        _setup_graphrag_mocks(mock_gsf, mock_vsf, mock_idx_cls)
+
+        with pytest.raises(ValueError, match="USE_BATCH_INFERENCE"):
+            mod._setup_graphrag("tenant-x")
+
 
 class TestExtractionClientConfig:
     """The botocore Config the extraction client is built with."""

@@ -19,12 +19,15 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 import structlog
+from coa_common.llm_provider import is_openai_compatible
 
 from .base import ClientSet
 
 if TYPE_CHECKING:
     from ..config import ServiceConfig
     from ..lexical.baseline_retriever import BaselineLexicalRetriever
+    from .bedrock import BedrockLLMClient
+    from .openai_compat import OpenAICompatLLMClient
 
 logger = structlog.get_logger(__name__)
 
@@ -66,7 +69,9 @@ def _is_neptune_analytics(endpoint: str) -> bool:
         # NA host, so fall through to the graph-id heuristic rather than failing
         # client construction at startup.
         host = ""
-    if host == "neptune-graph.amazonaws.com" or host.endswith(".neptune-graph.amazonaws.com"):
+    # The China partition serves the same host under ``amazonaws.com.cn``.
+    na_hosts = ("neptune-graph.amazonaws.com", "neptune-graph.amazonaws.com.cn")
+    if host in na_hosts or host.endswith(tuple(f".{h}" for h in na_hosts)):
         return True
     # A bare or embedded graph-id (g-…) with no NDB port indicator
     return bool(_extract_graph_id(endpoint) and ":8182" not in endpoint)
@@ -106,8 +111,25 @@ def build_clients() -> ClientSet:
     return _build_default_clients()
 
 
-def _build_default_clients() -> ClientSet:
+def build_llm_client(
+    model_id: str | None = None, region: str | None = None
+) -> BedrockLLMClient | OpenAICompatLLMClient:
+    """Construct the LLM client for the configured ``LLM_PROVIDER``.
+
+    ``bedrock`` (the default, also when unset) builds the Bedrock client;
+    ``openai_compatible`` builds the OpenAI-compatible one for regions without
+    Bedrock. Both satisfy ``LLMClient``.
+    """
+    if is_openai_compatible():
+        from .openai_compat import OpenAICompatLLMClient
+
+        return OpenAICompatLLMClient(model_id=model_id, region=region)
     from .bedrock import BedrockLLMClient
+
+    return BedrockLLMClient(model_id=model_id, region=region)
+
+
+def _build_default_clients() -> ClientSet:
     from .neptune import NeptuneGraphClient
     from .opensearch import OpenSearchVectorClient
     from .source_db import SourceDBQueryExecutor
@@ -115,7 +137,7 @@ def _build_default_clients() -> ClientSet:
     return ClientSet(
         graph=NeptuneGraphClient(),
         vector=OpenSearchVectorClient(),
-        llm=BedrockLLMClient(),
+        llm=build_llm_client(),
         # Executes authorized SQL against customer relational databases
         # (PostgreSQL via asyncpg, Athena for cross-source federation).
         query_executor=SourceDBQueryExecutor(),

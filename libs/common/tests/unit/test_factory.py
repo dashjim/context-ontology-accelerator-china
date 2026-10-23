@@ -56,6 +56,15 @@ class TestBuildTokenAuthorizer:
         )
         assert isinstance(authorizer, CognitoTokenAuthorizer)
 
+    def test_cognito_issuer_in_another_region_keeps_the_pool_region(self):
+        # An AWS China deployment trusting a commercial user pool: issuer and
+        # JWKS must point at the pool's region, not the deploy region.
+        issuer = "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_ABC123"
+        authorizer = build_token_authorizer(issuer=issuer, region="cn-northwest-1", client_id="c")
+        assert isinstance(authorizer, CognitoTokenAuthorizer)
+        assert authorizer._issuer == issuer
+        assert authorizer._configured_jwks_uri == f"{issuer}/.well-known/jwks.json"
+
     def test_okta_issuer_builds_oidc_authorizer(self):
         authorizer = build_token_authorizer(
             issuer="https://login.okta.com/oauth2/default",

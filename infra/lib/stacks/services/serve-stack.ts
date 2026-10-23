@@ -15,7 +15,20 @@ import type { IAlarmActionStrategy } from "cdk-monitoring-constructs/lib/common/
 import { resolveContext, namespaceTagKey } from "../../context";
 import { agentCoreSupportedSubnets } from "../../utils/agentcore-az";
 import { brandEnv } from "../../utils/brand-env";
-import { parseEcrImageUri } from "../../utils/ecr-utils";
+import {
+  applyAgentCorePlatformVersion,
+  grantLlmProviderSecret,
+  grantVectorStoreDomain,
+  imageBuildArgs,
+  llmProviderEnv,
+  resolveAgentCoreMemoryEnabled,
+  resolveVectorStore,
+  VECTOR_STORE_READ_ACTIONS,
+} from "../../utils/deployment-switches";
+import {
+  agentRuntimeArtifactFromImageUri,
+  parseEcrImageUri,
+} from "../../utils/ecr-utils";
 import { bundlePython } from "../../utils/python-bundling";
 import { fromRoot, Paths } from "../../paths";
 import { DynamoDBTable, SCLStack, SclMonitoring } from "../../constructs";
@@ -125,6 +138,7 @@ export class ServeStack extends SCLStack {
 
     const region = cdk.Stack.of(this).region;
     const account = cdk.Stack.of(this).account;
+    const partition = cdk.Stack.of(this).partition;
     const { prefix, ssmPrefix } = resolveContext(this.node);
 
     // ── Resolve OpenSearch config via SSM (decoupled from storage stack exports) ──
@@ -146,7 +160,7 @@ export class ServeStack extends SCLStack {
     // Avoids an SSM cross-stack read from SourcesStack (which would create a
     // circular dependency when SourcesStack needs this stack's runtime role ARN).
     const dataSourcesTableName = this.prefixed(TABLE_NAMES.SOURCES);
-    const dataSourcesTableArn = `arn:aws:dynamodb:${region}:${account}:table/${dataSourcesTableName}`;
+    const dataSourcesTableArn = `arn:${partition}:dynamodb:${region}:${account}:table/${dataSourcesTableName}`;
 
     const namespacesTableName = ssm.StringParameter.valueForStringParameter(
       this,
@@ -178,7 +192,7 @@ export class ServeStack extends SCLStack {
       this,
       `${ssmPrefix}/authentication-group-token-name`,
     );
-    const namespacesTableArn = `arn:aws:dynamodb:${region}:${account}:table/${namespacesTableName}`;
+    const namespacesTableArn = `arn:${partition}:dynamodb:${region}:${account}:table/${namespacesTableName}`;
 
     const runtimeName = this.agentRuntimeName.replace(/-/g, "_");
 
@@ -339,39 +353,45 @@ export class ServeStack extends SCLStack {
       description: "AOSS search proxy Lambda ARN (shared with MCP stack)",
     });
 
-    aossProxyFn.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ["aoss:APIAccessAll"],
-        resources: [opensearchCollectionArn],
-      }),
-    );
+    // vector_store=opensearch: a managed domain needs only the IAM grant.
+    const aossVectorStore = resolveVectorStore(this) === "aoss";
+    if (aossVectorStore) {
+      aossProxyFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ["aoss:APIAccessAll"],
+          resources: [opensearchCollectionArn],
+        }),
+      );
 
-    new opensearchserverless.CfnAccessPolicy(this, "OSSProxyDataAccess", {
-      name: this.prefixed("proxy-read-only"),
-      type: "data",
-      // NOTE: keep this description in sync with the deployed policy. AOSS's
-      // UpdateAccessPolicy API rejects an update that only removes the
-      // description (InvalidRequest), which would fail the whole stack update,
-      // so it must be preserved rather than dropped.
-      description: "Read-only data access for AOSS search proxy Lambda",
-      policy: JSON.stringify([
-        {
-          Rules: [
-            {
-              ResourceType: "index",
-              Resource: [`index/${opensearchCollectionName}/*`],
-              Permission: ["aoss:DescribeIndex", "aoss:ReadDocument"],
-            },
-            {
-              ResourceType: "collection",
-              Resource: [`collection/${opensearchCollectionName}`],
-              Permission: ["aoss:DescribeCollectionItems"],
-            },
-          ],
-          Principal: [aossProxyFn.role!.roleArn],
-        },
-      ]),
-    });
+      new opensearchserverless.CfnAccessPolicy(this, "OSSProxyDataAccess", {
+        name: this.prefixed("proxy-read-only"),
+        type: "data",
+        // NOTE: keep this description in sync with the deployed policy. AOSS's
+        // UpdateAccessPolicy API rejects an update that only removes the
+        // description (InvalidRequest), which would fail the whole stack update,
+        // so it must be preserved rather than dropped.
+        description: "Read-only data access for AOSS search proxy Lambda",
+        policy: JSON.stringify([
+          {
+            Rules: [
+              {
+                ResourceType: "index",
+                Resource: [`index/${opensearchCollectionName}/*`],
+                Permission: ["aoss:DescribeIndex", "aoss:ReadDocument"],
+              },
+              {
+                ResourceType: "collection",
+                Resource: [`collection/${opensearchCollectionName}`],
+                Permission: ["aoss:DescribeCollectionItems"],
+              },
+            ],
+            Principal: [aossProxyFn.role!.roleArn],
+          },
+        ]),
+      });
+    } else {
+      grantVectorStoreDomain(this, aossProxyFn, VECTOR_STORE_READ_ACTIONS);
+    }
 
     // ================================================================
     // OE monitoring (cdk-monitoring-constructs). Covers the AOSS search
@@ -428,22 +448,30 @@ export class ServeStack extends SCLStack {
         directory: Paths.root,
         file: "packages/context-manager/Dockerfile",
         platform: Platform.LINUX_ARM64,
+        buildArgs: imageBuildArgs(this),
       });
       imageUri = dockerAsset.imageUri;
     }
 
     {
       // ── AgentCore Memory — conversation session state ───────────────
-      const memory = new bedrockagentcore.Memory(this, "SessionMemory", {
-        memoryName: runtimeName + "_memory",
-        description: "Conversation history for Playground multi-turn sessions",
-        expirationDuration: cdk.Duration.days(30),
-      });
+      // Not offered in every region (not in AWS China), so
+      // `-c agentcore_memory_enabled=false` omits it: no Memory resource, no
+      // grants and no MEMORY_ID, and serve runs with conversation history
+      // disabled (sessions themselves still live in the DDB table above).
+      // Unset means enabled, except in cn- regions where it defaults off.
+      const memory = resolveAgentCoreMemoryEnabled(this)
+        ? new bedrockagentcore.Memory(this, "SessionMemory", {
+            memoryName: runtimeName + "_memory",
+            description:
+              "Conversation history for Playground multi-turn sessions",
+            expirationDuration: cdk.Duration.days(30),
+          })
+        : undefined;
 
       const runtime = new bedrockagentcore.Runtime(this, "AgentCoreRuntime", {
         runtimeName,
-        agentRuntimeArtifact:
-          bedrockagentcore.AgentRuntimeArtifact.fromImageUri(imageUri),
+        agentRuntimeArtifact: agentRuntimeArtifactFromImageUri(imageUri),
         authorizerConfiguration:
           bedrockagentcore.RuntimeAuthorizerConfiguration.usingJWT(
             `${issuerUrl}/.well-known/openid-configuration`,
@@ -645,7 +673,7 @@ export class ServeStack extends SCLStack {
           RRM_TABLE_NAME: props.resourceRoleMappingsTable.tableName,
           // IdP group claim name, resolved via SSM above.
           GROUP_CLAIM_NAME: groupClaimName,
-          MEMORY_ID: memory.memoryId,
+          ...(memory && { MEMORY_ID: memory.memoryId }),
           SESSION_METADATA_TABLE: sessionMetadata.table.tableName,
           SCL_CEDAR_FAIL_OPEN_NO_ROLES: (() => {
             const optIn =
@@ -669,13 +697,19 @@ export class ServeStack extends SCLStack {
           ...(props.allowedOverrideModels?.length && {
             ALLOWED_OVERRIDE_MODELS: props.allowedOverrideModels.join(","),
           }),
+          // BEDROCK_* access settings (cross-region Bedrock), or LLM_PROVIDER /
+          // OPENAI_COMPAT_* when llm_provider=openai_compatible.
+          ...llmProviderEnv(this),
         },
         description: "Context Manager orchestration service",
       });
+      applyAgentCorePlatformVersion(runtime);
 
       // Grant runtime access to Memory (short-term read/write for session history)
-      memory.grantWrite(runtime);
-      memory.grantRead(runtime);
+      if (memory) {
+        memory.grantWrite(runtime);
+        memory.grantRead(runtime);
+      }
 
       // ── AgentCore public endpoint for SSE streaming ──────────────────
       // Write the runtime ARN to the config. The frontend constructs the
@@ -712,7 +746,7 @@ export class ServeStack extends SCLStack {
         new iam.PolicyStatement({
           actions: ["ssm:GetParameter"],
           resources: [
-            `arn:aws:ssm:${region}:${account}:parameter${ssmPrefix}/*`,
+            `arn:${partition}:ssm:${region}:${account}:parameter${ssmPrefix}/*`,
           ],
         }),
       );
@@ -728,12 +762,14 @@ export class ServeStack extends SCLStack {
             "bedrock:ApplyGuardrail",
           ],
           resources: [
-            `arn:aws:bedrock:*:${account}:inference-profile/*`,
-            `arn:aws:bedrock:*::foundation-model/*`,
-            `arn:aws:bedrock:${region}:${account}:guardrail/*`,
+            `arn:${partition}:bedrock:*:${account}:inference-profile/*`,
+            `arn:${partition}:bedrock:*::foundation-model/*`,
+            `arn:${partition}:bedrock:${region}:${account}:guardrail/*`,
           ],
         }),
       );
+
+      grantLlmProviderSecret(this, runtime.role);
 
       // Neptune — graph store (read-only)
       runtime.addToRolePolicy(
@@ -799,10 +835,10 @@ export class ServeStack extends SCLStack {
           resources: [
             props.ontologyBucketArn,
             props.ontologyBucketArn + "/*",
-            `arn:aws:s3:::${athenaResultsBucket}`,
-            `arn:aws:s3:::${athenaResultsBucket}/*`,
-            `arn:aws:s3:::${this.prefixed("demo-data")}`,
-            `arn:aws:s3:::${this.prefixed("demo-data")}/*`,
+            `arn:${partition}:s3:::${athenaResultsBucket}`,
+            `arn:${partition}:s3:::${athenaResultsBucket}/*`,
+            `arn:${partition}:s3:::${this.prefixed("demo-data")}`,
+            `arn:${partition}:s3:::${this.prefixed("demo-data")}/*`,
           ],
         }),
       );
@@ -813,7 +849,10 @@ export class ServeStack extends SCLStack {
       runtime.addToRolePolicy(
         new iam.PolicyStatement({
           actions: ["s3:GetObject", "s3:ListBucket", "s3:GetBucketLocation"],
-          resources: [`arn:aws:s3:::${prefix}-*`, `arn:aws:s3:::${prefix}-*/*`],
+          resources: [
+            `arn:${partition}:s3:::${prefix}-*`,
+            `arn:${partition}:s3:::${prefix}-*/*`,
+          ],
         }),
       );
 
@@ -828,8 +867,8 @@ export class ServeStack extends SCLStack {
             "athena:GetDataCatalog",
           ],
           resources: [
-            `arn:aws:athena:${region}:${account}:workgroup/*`,
-            `arn:aws:athena:${region}:${account}:datacatalog/*`,
+            `arn:${partition}:athena:${region}:${account}:workgroup/*`,
+            `arn:${partition}:athena:${region}:${account}:datacatalog/*`,
           ],
         }),
       );
@@ -860,7 +899,7 @@ export class ServeStack extends SCLStack {
         new iam.PolicyStatement({
           actions: ["redshift-serverless:GetCredentials"],
           resources: [
-            `arn:aws:redshift-serverless:${region}:${account}:workgroup/*`,
+            `arn:${partition}:redshift-serverless:${region}:${account}:workgroup/*`,
           ],
         }),
       );
@@ -889,14 +928,14 @@ export class ServeStack extends SCLStack {
             "glue:GetUnfilteredPartitionMetadata",
           ],
           resources: [
-            `arn:aws:glue:${region}:${account}:catalog`,
-            `arn:aws:glue:${region}:${account}:catalog/*`,
-            `arn:aws:glue:${region}:${account}:database/*`,
-            `arn:aws:glue:${region}:${account}:table/*/*`,
-            `arn:aws:glue:${region}:${account}:connection/${fedCatalogPrefix}*`,
-            `arn:aws:glue:${region}:${account}:catalog/${fedCatalogPrefix}*`,
-            `arn:aws:glue:${region}:${account}:database/${fedCatalogPrefix}*/*`,
-            `arn:aws:glue:${region}:${account}:table/${fedCatalogPrefix}*/*/*`,
+            `arn:${partition}:glue:${region}:${account}:catalog`,
+            `arn:${partition}:glue:${region}:${account}:catalog/*`,
+            `arn:${partition}:glue:${region}:${account}:database/*`,
+            `arn:${partition}:glue:${region}:${account}:table/*/*`,
+            `arn:${partition}:glue:${region}:${account}:connection/${fedCatalogPrefix}*`,
+            `arn:${partition}:glue:${region}:${account}:catalog/${fedCatalogPrefix}*`,
+            `arn:${partition}:glue:${region}:${account}:database/${fedCatalogPrefix}*/*`,
+            `arn:${partition}:glue:${region}:${account}:table/${fedCatalogPrefix}*/*/*`,
           ],
         }),
       );
@@ -926,8 +965,8 @@ export class ServeStack extends SCLStack {
             "s3:DeleteObject",
           ],
           resources: [
-            `arn:aws:s3:::${athenaSpillBucket}`,
-            `arn:aws:s3:::${athenaSpillBucket}/*`,
+            `arn:${partition}:s3:::${athenaSpillBucket}`,
+            `arn:${partition}:s3:::${athenaSpillBucket}/*`,
           ],
         }),
       );
@@ -964,7 +1003,7 @@ export class ServeStack extends SCLStack {
           // connector in another region when given its full ARN, but we do not
           // support that topology, and the control-plane rejects a connector ARN
           // outside this region at source-create.
-          resources: [`arn:aws:lambda:${region}:*:function:*`],
+          resources: [`arn:${partition}:lambda:${region}:*:function:*`],
           conditions: {
             "ForAnyValue:StringEquals": {
               "aws:CalledVia": "athena.amazonaws.com",
@@ -1007,7 +1046,7 @@ export class ServeStack extends SCLStack {
           sid: "DenyAthenaInvokeOfUntaggedFunctions",
           effect: iam.Effect.DENY,
           actions: ["lambda:InvokeFunction"],
-          resources: [`arn:aws:lambda:*:${account}:function:*`],
+          resources: [`arn:${partition}:lambda:*:${account}:function:*`],
           conditions: {
             "ForAnyValue:StringEquals": {
               "aws:CalledVia": "athena.amazonaws.com",
@@ -1083,7 +1122,7 @@ export class ServeStack extends SCLStack {
         new iam.PolicyStatement({
           sid: "AthenaFederationSpillRead",
           actions: ["s3:GetObject"],
-          resources: [`arn:aws:s3:::*/${CONNECTOR_SPILL_KEY_GLOB}`],
+          resources: [`arn:${partition}:s3:::*/${CONNECTOR_SPILL_KEY_GLOB}`],
           conditions: {
             "ForAnyValue:StringEquals": {
               "aws:CalledVia": "athena.amazonaws.com",
@@ -1120,7 +1159,7 @@ export class ServeStack extends SCLStack {
         new iam.PolicyStatement({
           sid: "AthenaFederationSpillBucketLocation",
           actions: ["s3:GetBucketLocation"],
-          resources: ["arn:aws:s3:::*"],
+          resources: [`arn:${partition}:s3:::*`],
           conditions: {
             "ForAnyValue:StringEquals": {
               "aws:CalledVia": "athena.amazonaws.com",
@@ -1133,7 +1172,7 @@ export class ServeStack extends SCLStack {
         new iam.PolicyStatement({
           sid: "AthenaFederationSpillList",
           actions: ["s3:ListBucket"],
-          resources: ["arn:aws:s3:::*"],
+          resources: [`arn:${partition}:s3:::*`],
           conditions: {
             "ForAnyValue:StringEquals": {
               "aws:CalledVia": "athena.amazonaws.com",
@@ -1156,7 +1195,7 @@ export class ServeStack extends SCLStack {
         new iam.PolicyStatement({
           sid: "AthenaFederationSpillDecryptViaS3",
           actions: ["kms:Decrypt"],
-          resources: [`arn:aws:kms:${region}:*:key/*`],
+          resources: [`arn:${partition}:kms:${region}:*:key/*`],
           conditions: {
             // Both keys live in ONE StringEquals object: a second `StringEquals`
             // property would overwrite the first in the object literal, silently
@@ -1186,7 +1225,7 @@ export class ServeStack extends SCLStack {
             // Cannot regress the managed-JDBC path: Orion's own spill bucket is
             // S3_MANAGED, so it never calls KMS.
             StringEquals: {
-              "kms:ViaService": `s3.${region}.amazonaws.com`,
+              "kms:ViaService": `s3.${region}.${cdk.Stack.of(this).urlSuffix}`,
               [`aws:ResourceTag/${CONNECTOR_SPILL_KMS_TAG_KEY}`]:
                 CONNECTOR_SPILL_KMS_TAG_VALUE,
             },
@@ -1227,7 +1266,7 @@ export class ServeStack extends SCLStack {
           sid: "ReadPlatformSecrets",
           actions: ["secretsmanager:GetSecretValue"],
           resources: [
-            `arn:aws:secretsmanager:${region}:${account}:secret:${prefix}-*`,
+            `arn:${partition}:secretsmanager:${region}:${account}:secret:${prefix}-*`,
           ],
           conditions: {
             Null: {
@@ -1251,37 +1290,41 @@ export class ServeStack extends SCLStack {
       // policy naming the runtime role as a principal — without the data-access
       // policy the collection returns AuthorizationException(403). The network
       // path already exists (AgentCore SG → AOSS VPC endpoint, see AossVpceIngress).
-      runtime.addToRolePolicy(
-        new iam.PolicyStatement({
-          actions: ["aoss:APIAccessAll"],
-          resources: [opensearchCollectionArn],
-        }),
-      );
+      if (aossVectorStore) {
+        runtime.addToRolePolicy(
+          new iam.PolicyStatement({
+            actions: ["aoss:APIAccessAll"],
+            resources: [opensearchCollectionArn],
+          }),
+        );
 
-      new opensearchserverless.CfnAccessPolicy(this, "OSSServeDataAccess", {
-        name: this.prefixed("serve-read-only"),
-        type: "data",
-        // Keep in sync with the deployed policy — AOSS rejects a description-only
-        // removal on update (see OSSProxyDataAccess note above).
-        description: "Read-only data access for AgentCore runtime task",
-        policy: JSON.stringify([
-          {
-            Rules: [
-              {
-                ResourceType: "index",
-                Resource: [`index/${opensearchCollectionName}/*`],
-                Permission: ["aoss:DescribeIndex", "aoss:ReadDocument"],
-              },
-              {
-                ResourceType: "collection",
-                Resource: [`collection/${opensearchCollectionName}`],
-                Permission: ["aoss:DescribeCollectionItems"],
-              },
-            ],
-            Principal: [runtime.role!.roleArn],
-          },
-        ]),
-      });
+        new opensearchserverless.CfnAccessPolicy(this, "OSSServeDataAccess", {
+          name: this.prefixed("serve-read-only"),
+          type: "data",
+          // Keep in sync with the deployed policy — AOSS rejects a description-only
+          // removal on update (see OSSProxyDataAccess note above).
+          description: "Read-only data access for AgentCore runtime task",
+          policy: JSON.stringify([
+            {
+              Rules: [
+                {
+                  ResourceType: "index",
+                  Resource: [`index/${opensearchCollectionName}/*`],
+                  Permission: ["aoss:DescribeIndex", "aoss:ReadDocument"],
+                },
+                {
+                  ResourceType: "collection",
+                  Resource: [`collection/${opensearchCollectionName}`],
+                  Permission: ["aoss:DescribeCollectionItems"],
+                },
+              ],
+              Principal: [runtime.role!.roleArn],
+            },
+          ]),
+        });
+      } else {
+        grantVectorStoreDomain(this, runtime, VECTOR_STORE_READ_ACTIONS);
+      }
 
       // ── SSM Parameter for auto-discovery ─────────────────────────────
       new ssm.StringParameter(this, "AgentRuntimeArnParam", {

@@ -43,7 +43,7 @@ import os
 import structlog
 from coa_common import resolve_region
 from coa_common.logging import setup_logging
-from coa_common.opensearch import AossVectorClient
+from coa_common.opensearch import AossVectorClient, patch_graphrag_signing_service
 
 from .graph_build import (
     EMBEDDING_INDEXES,
@@ -148,6 +148,8 @@ def main() -> None:
     _patch_graphrag_toolkit_for_aoss_nextgen(allow_create=False)
     _patch_graphrag_paginated_search_retry()
     _patch_graphrag_bulk_ingest_retry()
+    # graphrag signs for "aoss" only; a managed domain (vector_store=opensearch) needs "es".
+    patch_graphrag_signing_service(OPENSEARCH_ENDPOINT)
 
     from graphrag_toolkit.lexical_graph import LexicalGraphIndex
     from graphrag_toolkit.lexical_graph.indexing.build.delete_sources import DeleteSources

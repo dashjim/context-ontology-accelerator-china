@@ -31,6 +31,7 @@ import {
 } from "../../constants";
 import { Paths, fromRoot } from "../../paths";
 import { bundlePython } from "../../utils/python-bundling";
+import { isChinaRegion } from "../../utils/deployment-switches";
 import {
   readOpenApiSpec,
   mergeOpenApiPaths,
@@ -141,6 +142,7 @@ export class ApiStack extends SCLStack {
     const { ssmPrefix } = resolveContext(this.node);
     const region = cdk.Stack.of(this).region;
     const account = cdk.Stack.of(this).account;
+    const partition = cdk.Stack.of(this).partition;
 
     // IdP issuer/client ID via SSM (avoids a cross-stack export on the auth
     // stack's UserPoolClient — see idp-authentication-stack.ts for the writer).
@@ -168,7 +170,7 @@ export class ApiStack extends SCLStack {
       this,
       `${ssmPrefix}/namespace/namespaces-table-name`,
     );
-    const namespacesTableArn = `arn:aws:dynamodb:${region}:${account}:table/${namespacesTableName}`;
+    const namespacesTableArn = `arn:${partition}:dynamodb:${region}:${account}:table/${namespacesTableName}`;
 
     // ── Custom Lambda Authorizer ───────────────────────────────────
     const authorizerFn = new lambda.Function(this, "AuthorizerFn", {
@@ -535,6 +537,10 @@ export class ApiStack extends SCLStack {
       description: "Context Ontology Accelerator REST API",
       apiDefinition: apigw.ApiDefinition.fromInline(spec),
       cloudWatchRole: true,
+      // AWS China API Gateway has no EDGE endpoints (the default).
+      ...(isChinaRegion(this) && {
+        endpointTypes: [apigw.EndpointType.REGIONAL],
+      }),
       ...(apiCustomDomain && {
         disableExecuteApiEndpoint: true,
         domainName: {

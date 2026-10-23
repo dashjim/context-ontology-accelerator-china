@@ -198,6 +198,27 @@ class TestStoreUris:
             index_names=mod.EMBEDDING_INDEXES,
         )
 
+    @pytest.mark.parametrize(
+        "endpoint",
+        [
+            "abc123.us-east-1.aoss.amazonaws.com",
+            "https://vpc-coa-dev-vector-store-x.cn-north-1.es.amazonaws.com.cn",
+        ],
+    )
+    @patch(_P_IDX)
+    @patch(_P_GSF)
+    @patch(_P_VSF)
+    def test_graphrag_signing_follows_the_endpoint(self, mock_vsf, mock_gsf, mock_idx_cls, mod, monkeypatch, endpoint):
+        """graphrag is re-signed for the endpoint's service before any store is built."""
+        _make_store_mocks(mock_gsf, mock_vsf)
+        _make_graph_index(mock_idx_cls, [])
+        monkeypatch.setattr(mod, "OPENSEARCH_ENDPOINT", endpoint)
+
+        with patch.object(mod, "patch_graphrag_signing_service") as mock_patch:
+            mod.main()
+
+        mock_patch.assert_called_once_with(endpoint)
+
     @patch(_P_IDX)
     @patch(_P_GSF)
     @patch(_P_VSF)

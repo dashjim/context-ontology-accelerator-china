@@ -14,6 +14,7 @@ from dataclasses import dataclass
 import boto3
 from botocore.config import Config
 
+from coa_common.bedrock_access import map_bedrock_model_id, prepare_bedrock_client
 from coa_common.config import resolve_region
 from coa_common.guardrail_metrics import (
     COMPONENT_ENRICHMENT,
@@ -21,6 +22,7 @@ from coa_common.guardrail_metrics import (
     emit_guardrail_decision,
     filter_type_from_assessments,
 )
+from coa_common.llm_provider import is_openai_compatible, openai_compat_runtime_client, skip_unsupported_guardrail
 
 logger = logging.getLogger(__name__)
 
@@ -165,19 +167,28 @@ class BedrockClient:
         # guardrail decision metrics, and no ECS task definition sets AWS_REGION —
         # so a lone getenv silently files metrics in us-east-1. See config.resolve_region.
         self._region = region or resolve_region()
-        self._model_id = model_id
+        self._model_id = map_bedrock_model_id(model_id)
         self._guardrail_id = guardrail_id
         self._guardrail_version = guardrail_version or _DEFAULT_GUARDRAIL_VERSION
         self._max_input_chars = max_input_chars
         self._component = component
-        self._client = boto3.client(
-            "bedrock-runtime",
-            region_name=self._region,
-            config=Config(
-                retries={"mode": "adaptive", "max_attempts": 3},
-                read_timeout=read_timeout,
-            ),
+        if guardrail_id and is_openai_compatible():
+            # No Bedrock Guardrails on this backend. Clearing the id (after the
+            # warning) also keeps unscreened calls out of the guardrail decision
+            # metrics, where they would otherwise be counted as ALLOW.
+            skip_unsupported_guardrail(guardrail_id, component=component)
+            self._guardrail_id = None
+        config = Config(
+            retries={"mode": "adaptive", "max_attempts": 3},
+            read_timeout=read_timeout,
         )
+        if is_openai_compatible():
+            self._client = openai_compat_runtime_client(config)
+        else:
+            # BEDROCK_REGION may point the client elsewhere; metrics stay in self._region.
+            self._client = boto3.client(
+                "bedrock-runtime", region_name=prepare_bedrock_client(self._region), config=config
+            )
 
     @staticmethod
     def _check_guardrail_blocked(guardrail_trace: dict) -> bool:

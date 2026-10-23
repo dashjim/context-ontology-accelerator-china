@@ -51,7 +51,8 @@ USER_POOL_ID=$(get_output "${STACK_PREFIX}-auth" "UserPoolId" 2>/dev/null || tru
 
 # If no OIDC Issuer output, build it from UserPoolId (Cognito mode)
 if [[ -z "$AUTHORITY" && -n "$USER_POOL_ID" ]]; then
-  AUTHORITY="https://cognito-idp.${REGION}.amazonaws.com/${USER_POOL_ID}"
+  case "$REGION" in cn-*) DNS_SUFFIX="amazonaws.com.cn" ;; *) DNS_SUFFIX="amazonaws.com" ;; esac
+  AUTHORITY="https://cognito-idp.${REGION}.${DNS_SUFFIX}/${USER_POOL_ID}"
 fi
 
 echo "Fetching outputs from ${STACK_PREFIX}-api ..."

@@ -9,7 +9,9 @@ import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 from coa_common import async_boto_config
 from coa_common.bedrock import extract_text_blocks
+from coa_common.bedrock_access import map_bedrock_model_id, prepare_bedrock_client
 from coa_common.bedrock_metrics import CostTracker
+from coa_common.llm_provider import is_openai_compatible, openai_compat_runtime_client
 
 from coa_ontology.inducer.services.grounding import _BEDROCK_MAX_POOL_CONNECTIONS
 
@@ -41,7 +43,7 @@ class LLMClient:
             region: AWS region for the Bedrock runtime client.
             cost_tracker: Optional tracker that records token usage per generate call.
         """
-        self.model_id = model_id
+        self.model_id = map_bedrock_model_id(model_id)
         self.region = region
         self._client = None
         self._cost_tracker = cost_tracker
@@ -55,11 +57,13 @@ class LLMClient:
             # Same connection-pool cap as the grounding rerank client (see
             # grounding.py:_BEDROCK_MAX_POOL_CONNECTIONS) to prevent a future
             # pool-starvation footgun if this client is ever fanned out.
-            self._client = boto3.client(
-                "bedrock-runtime",
-                region_name=self.region,
-                config=async_boto_config(read_timeout=120, max_pool_connections=_BEDROCK_MAX_POOL_CONNECTIONS),
-            )
+            config = async_boto_config(read_timeout=120, max_pool_connections=_BEDROCK_MAX_POOL_CONNECTIONS)
+            if is_openai_compatible():
+                self._client = openai_compat_runtime_client(config)
+            else:
+                self._client = boto3.client(
+                    "bedrock-runtime", region_name=prepare_bedrock_client(self.region), config=config
+                )
         return self._client
 
     def generate(self, prompt: str, system: str = "", max_tokens: int = 4096) -> str:

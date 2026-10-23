@@ -159,12 +159,19 @@ export function bundlePython(opts: PythonBundlingOptions): lambda.Code {
     .join(" && ")
     .replace(new RegExp(escapeRegExp(rootForward), "g"), "/asset-input");
 
+  // The local uv step inherits the host environment, so a PyPI mirror set there
+  // as UV_DEFAULT_INDEX applies to it as-is. The Docker fallback does not see the
+  // host environment: forward the host's PIP_INDEX_URL to its pip. Only when set,
+  // because the bundling options are part of the asset hash.
+  const pipIndexUrl = process.env.PIP_INDEX_URL?.trim();
+
   return lambda.Code.fromAsset(Paths.root, {
     assetHashType: cdk.AssetHashType.CUSTOM,
     assetHash,
     bundling: {
       image: lambda.Runtime.PYTHON_3_12.bundlingImage,
       command: ["bash", "-c", dockerCmd],
+      ...(pipIndexUrl && { environment: { PIP_INDEX_URL: pipIndexUrl } }),
       local: {
         tryBundle(_outputDir: string) {
           // Skip local bundling on Windows — always use Docker.

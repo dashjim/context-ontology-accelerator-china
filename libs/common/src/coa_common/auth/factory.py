@@ -71,7 +71,11 @@ def build_token_authorizer(
     """
     if is_cognito_issuer(issuer):
         user_pool_id = issuer.rstrip("/").rsplit("/", maxsplit=1)[-1]
-        return CognitoTokenAuthorizer(user_pool_id=user_pool_id, region=region, client_id=client_id)
+        # The pool's region comes from the issuer host, not the deploy region:
+        # a deployment may trust a user pool in another region (AWS China
+        # trusting a commercial pool), and its JWKS lives in the pool's region.
+        pool_region = (urlparse(issuer).hostname or "").split(".")[1]
+        return CognitoTokenAuthorizer(user_pool_id=user_pool_id, region=pool_region, client_id=client_id)
     return OIDCTokenAuthorizer(
         issuer=issuer,
         audience=client_id,

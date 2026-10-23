@@ -1313,6 +1313,38 @@ class TestMaxTablesEnvParsing:
             importlib.reload(mod)
 
 
+class TestMetadataStoreDomainIdAtImport:
+    def test_dynamodb_backend_imports_without_smus_domain_id(self, monkeypatch):
+        """SMUS_DOMAIN_ID is read at import; the DynamoDB backend needs none, so
+        its absence must not crash the Lambda on cold start."""
+        import importlib
+
+        import coa_sources.database.pipeline.discovery_handler as mod
+
+        monkeypatch.setenv("METADATA_STORE_BACKEND", "dynamodb")
+        monkeypatch.delenv("SMUS_DOMAIN_ID")
+        try:
+            assert importlib.reload(mod).SMUS_DOMAIN_ID == ""
+        finally:
+            monkeypatch.delenv("METADATA_STORE_BACKEND")
+            monkeypatch.setenv("SMUS_DOMAIN_ID", "dz-test-domain")
+            importlib.reload(mod)
+
+    def test_smus_backend_still_requires_smus_domain_id(self, monkeypatch):
+        import importlib
+
+        import coa_sources.database.pipeline.discovery_handler as mod
+
+        monkeypatch.delenv("METADATA_STORE_BACKEND", raising=False)
+        monkeypatch.delenv("SMUS_DOMAIN_ID")
+        try:
+            with pytest.raises(KeyError, match="SMUS_DOMAIN_ID"):
+                importlib.reload(mod)
+        finally:
+            monkeypatch.setenv("SMUS_DOMAIN_ID", "dz-test-domain")
+            importlib.reload(mod)
+
+
 class TestCustomConnectorDiscovery:
     """Threading the custom-connector config, and surfacing a degraded scan.
 

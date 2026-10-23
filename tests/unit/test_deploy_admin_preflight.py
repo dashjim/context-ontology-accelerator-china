@@ -39,7 +39,7 @@ if [ "$1 $2" = "sts get-caller-identity" ]; then
       exit 254
       ;;
     *)
-      echo "{_ACCOUNT}"
+      printf '%s\\t%s\\n' "{_ACCOUNT}" "arn:${{AWS_STUB_PARTITION:-aws}}:iam::{_ACCOUNT}:user/tester"
       exit 0
       ;;
   esac
@@ -130,6 +130,14 @@ def test_confirmed_missing_role_shows_known_account_remediation(aws_stub: tuple[
     assert f"account {_ACCOUNT} has no role named 'Admin'" in output
     assert f"SCL_SMUS_ADMIN_ARNS=arn:aws:iam::{_ACCOUNT}:role/" in output
     assert "<account>" not in output
+
+
+def test_missing_role_remediation_uses_the_callers_partition(aws_stub: tuple[Path, Path]) -> None:
+    result = _run(aws_stub, "missing", AWS_STUB_PARTITION="aws-cn")
+    output = result.stdout + result.stderr
+
+    assert result.returncode == 1
+    assert f"SCL_SMUS_ADMIN_ARNS=arn:aws-cn:iam::{_ACCOUNT}:role/" in output
 
 
 def test_access_denied_is_not_reported_as_a_missing_role(aws_stub: tuple[Path, Path]) -> None:

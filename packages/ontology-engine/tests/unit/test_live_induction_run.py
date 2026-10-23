@@ -50,6 +50,9 @@ def harness(monkeypatch):
     monkeypatch.setenv("NA_GRAPH_ID", "g-test")
     monkeypatch.setenv("DYNAMODB_TABLE", "t-test")
     monkeypatch.setenv("AWS_REGION", "us-east-1")
+    # The script setdefault()s BEDROCK_REGION at import; set it here so the value
+    # is undone after the test instead of leaking into every later Bedrock client.
+    monkeypatch.setenv("BEDROCK_REGION", "us-east-1")
 
     spec = importlib.util.spec_from_file_location("live_induction_run_under_test", _SCRIPT)
     mod = importlib.util.module_from_spec(spec)

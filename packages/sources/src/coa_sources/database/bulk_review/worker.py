@@ -48,7 +48,7 @@ from coa_common import resolve_region
 from coa_common.dao import DynamoDBDAO
 from coa_common.datazone_forms import FORM_TYPE_NAME, build_forms_input, deserialize_form
 from coa_common.domain_models import Table
-from coa_common.metadata_store import SMUSClient
+from coa_common.metadata_store import MetadataStoreClient, build_metadata_store_client
 from coa_common.review_logic import apply_decision_to_table
 from coa_common.s3 import get_s3_client, read_file_bytes
 from coa_control_plane_server.models.review_decision import ReviewDecision
@@ -210,7 +210,7 @@ def parse_message(body: str | dict[str, Any]) -> BulkReviewMessage:
 # ---------------------------------------------------------------------------
 
 
-def _load_one_asset(client: SMUSClient, asset: Any, source_id: str) -> dict[str, Any] | None:
+def _load_one_asset(client: MetadataStoreClient, asset: Any, source_id: str) -> dict[str, Any] | None:
     """Fetch + deserialize a single asset's table form. Returns None on skip.
 
     I/O-bound (one get_asset_forms round-trip); dispatched to a thread pool so a
@@ -241,7 +241,7 @@ def _load_one_asset(client: SMUSClient, asset: Any, source_id: str) -> dict[str,
 
 
 def _load_asset_page(
-    client: SMUSClient,
+    client: MetadataStoreClient,
     project_id: str,
     source_id: str,
     *,
@@ -310,7 +310,7 @@ def _enqueue_continuation(msg: BulkReviewMessage, next_token: str, tables_approv
     )
 
 
-def _write_revision(client: SMUSClient, asset: dict[str, Any]) -> str | None:
+def _write_revision(client: MetadataStoreClient, asset: dict[str, Any]) -> str | None:
     """Write a single asset revision. Returns table_id on failure, else None."""
     table = asset["table"]
     try:
@@ -547,7 +547,9 @@ def _delete_backup(source_id: str) -> None:
         logger.warning("rescan_backup_delete_failed", extra={"source_id": source_id})
 
 
-def _resolve_asset_ids(client: SMUSClient, project_id: str, source_id: str, wanted_names: set[str]) -> dict[str, str]:
+def _resolve_asset_ids(
+    client: MetadataStoreClient, project_id: str, source_id: str, wanted_names: set[str]
+) -> dict[str, str]:
     """Map DataZone asset names to ids for a bounded set of re-scan targets.
 
     Pages ``search_assets`` (the same search the cascade uses) only until every
@@ -584,7 +586,7 @@ def _extract_table(detail: dict[str, Any], source_id: str) -> Table | None:
 
 
 def _apply_rescan_removals(
-    client: SMUSClient, project_id: str, source_id: str, backup: dict[str, Any] | None
+    client: MetadataStoreClient, project_id: str, source_id: str, backup: dict[str, Any] | None
 ) -> tuple[list[str], int]:
     """Delete a re-scan's removed tables and drop its removed columns (approve).
 
@@ -642,7 +644,7 @@ def _apply_rescan_removals(
 
 
 def _process_rescan_reject(
-    client: SMUSClient, project_id: str, source_id: str, backup: dict[str, Any] | None
+    client: MetadataStoreClient, project_id: str, source_id: str, backup: dict[str, Any] | None
 ) -> list[str]:
     """Restore the pre-rescan state on a re-scan reject; returns failed table_ids.
 
@@ -699,7 +701,7 @@ def _process_rescan_reject(
 def process_bulk_review(
     *,
     msg: BulkReviewMessage,
-    client: SMUSClient,
+    client: MetadataStoreClient,
     project_id: str,
     sources_table: str,
     region: str,
@@ -958,8 +960,8 @@ _PROJECT_ACCESS_ROLE_ARN: str = os.environ.get("PROJECT_ACCESS_ROLE_ARN", "")
 _AWS_REGION: str = resolve_region()
 
 
-def _build_smus_client() -> SMUSClient:
-    return SMUSClient(
+def _build_smus_client() -> MetadataStoreClient:
+    return build_metadata_store_client(
         domain_id=_SMUS_DOMAIN_ID,
         region_name=_AWS_REGION,
         assume_role_arn=_PROJECT_ACCESS_ROLE_ARN or None,

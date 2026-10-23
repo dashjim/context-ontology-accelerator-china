@@ -579,7 +579,7 @@ export class AthenaFederationConnector extends Construct {
     queryRoleArns: readonly string[],
     spillPrefix: string,
   ): void {
-    const viaS3 = `s3.${cdk.Stack.of(this).region}.amazonaws.com`;
+    const viaS3 = `s3.${cdk.Stack.of(this).region}.${cdk.Stack.of(this).urlSuffix}`;
 
     // Deduped (grantInvoke's construct id derives from the principal) and sorted (the Sid indexes
     // below must not depend on the order the ARNs arrived in).

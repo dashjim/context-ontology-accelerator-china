@@ -13,6 +13,7 @@ import {
   RESOURCE_PREFIX,
   managedEnvFor,
   managedStack,
+  resourceArn,
   statementWithSid,
   synth,
   synthManaged,
@@ -65,7 +66,7 @@ describe("the reserved datasource-access role prefix", () => {
     // sides read one constant — so the literal is pinned here too.
     expect(RESERVED_DATASOURCE_ROLE_SEGMENT).toBe("datasource-access-");
     const statement = statementWithSid(synthManaged(), "AssumeRoleCoaManaged");
-    expect(statement.Resource).toBe(`arn:aws:iam::*:role/${RESERVED_DATASOURCE_ROLE_PREFIX}*`);
+    expect(resourceArn(statement)).toBe(`arn:aws:iam::*:role/${RESERVED_DATASOURCE_ROLE_PREFIX}*`);
   });
 
   it("fails the synth outright for a role named under the prefix", () => {

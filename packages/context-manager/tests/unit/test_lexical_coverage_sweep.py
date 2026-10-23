@@ -222,6 +222,7 @@ class TestGraphStoreUriSeams:
             "g-abc1234567.us-east-1.neptune-graph.amazonaws.com",
             "https://g-abc1234567.us-east-1.neptune-graph.amazonaws.com",
             "neptune-graph.amazonaws.com",
+            "https://neptune-graph.amazonaws.com.cn/graph",
         ],
     )
     def test_real_na_hosts_detected(self, endpoint):
@@ -234,6 +235,7 @@ class TestGraphStoreUriSeams:
         [
             # Suffix-extension look-alike: the real host is other.test.
             "https://neptune-graph.amazonaws.com.other.test/graph",
+            "https://neptune-graph.amazonaws.com.cn.other.test/graph",
             # Service host present only in the path.
             "https://other.test/neptune-graph.amazonaws.com",
             # Label-boundary look-alike (not a ".neptune-graph…" subdomain).

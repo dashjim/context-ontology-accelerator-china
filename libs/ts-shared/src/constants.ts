@@ -129,6 +129,8 @@ export const TABLE_NAMES = {
   SOURCE_SCAN_JOBS: "source-scan-jobs",
   ONTOLOGY_ENGINE: "ontology-engine",
   METRIC_IMPORT_JOBS: "metric-import-jobs",
+  /** DynamoDB metadata store (METADATA_STORE_BACKEND=dynamodb, no DataZone). */
+  METADATA_STORE: "metadata-store",
 } as const;
 
 // ---------------------------------------------------------------------------

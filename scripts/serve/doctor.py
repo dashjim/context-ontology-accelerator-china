@@ -65,7 +65,8 @@ def check_runtime():
     )
     token = auth["AuthenticationResult"]["IdToken"]
     encoded_arn = urllib.parse.quote(runtime_arn, safe="")
-    url = f"https://bedrock-agentcore.{region}.amazonaws.com/runtimes/{encoded_arn}/invocations?qualifier=DEFAULT"
+    suffix = "amazonaws.com.cn" if region.startswith("cn-") else "amazonaws.com"
+    url = f"https://bedrock-agentcore.{region}.{suffix}/runtimes/{encoded_arn}/invocations?qualifier=DEFAULT"
     payload = json.dumps(
         {"query": "ping", "namespace": namespace, "options": {"tierOverride": 3}, "requestId": str(uuid.uuid4())}
     ).encode()

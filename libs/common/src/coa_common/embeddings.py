@@ -43,9 +43,11 @@ import structlog
 from botocore.config import Config
 from botocore.exceptions import ClientError, ConnectTimeoutError, ReadTimeoutError
 
+from coa_common.bedrock_access import map_bedrock_model_id, prepare_bedrock_client
 from coa_common.bedrock_metrics import CostTracker
 from coa_common.config import resolve_region
 from coa_common.constants import DEFAULT_EMBED_DIMENSIONS, DEFAULT_EMBED_MODEL_ID
+from coa_common.llm_provider import is_openai_compatible, openai_compat_runtime_client
 from coa_common.metrics import emit_metric
 
 logger = structlog.get_logger(__name__)
@@ -218,7 +220,9 @@ class BedrockEmbedder:
         cost_tracker: CostTracker | None = None,
     ) -> None:
         """Resolve model/region/timeout config and clamp the batch size (see class Args)."""
-        self.model_id = model_id or os.environ.get("BEDROCK_EMBED_MODEL_ID", DEFAULT_EMBED_MODEL_ID)
+        self.model_id = map_bedrock_model_id(
+            model_id or os.environ.get("BEDROCK_EMBED_MODEL_ID", DEFAULT_EMBED_MODEL_ID)
+        )
         self.dimensions = dimensions
         self._region = region or os.environ.get("BEDROCK_REGION", resolve_region())
         self._max_workers = max_workers
@@ -236,15 +240,20 @@ class BedrockEmbedder:
         if self._client is None:
             with self._client_lock:
                 if self._client is None:
-                    self._client = boto3.client(
-                        "bedrock-runtime",
-                        region_name=self._region,
-                        config=Config(
-                            max_pool_connections=max(self._max_workers, 10),
-                            read_timeout=self._read_timeout,
-                            retries={"max_attempts": 5, "mode": "adaptive"},
-                        ),
+                    config = Config(
+                        max_pool_connections=max(self._max_workers, 10),
+                        read_timeout=self._read_timeout,
+                        retries={"max_attempts": 5, "mode": "adaptive"},
                     )
+                    if is_openai_compatible():
+                        # Same request/response contract (Cohere/Titan body in,
+                        # Bedrock-shaped body out), so batching, subdivision,
+                        # retry and cost metering below are unchanged.
+                        self._client = openai_compat_runtime_client(config)
+                    else:
+                        self._client = boto3.client(
+                            "bedrock-runtime", region_name=prepare_bedrock_client(self._region), config=config
+                        )
         return self._client
 
     def set_cost_tracker(self, cost_tracker: CostTracker | None) -> None:

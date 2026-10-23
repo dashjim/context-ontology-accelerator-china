@@ -6,6 +6,8 @@
 Minimal proxy that executes opensearch-py queries against AOSS.
 Deployed in VPC with IAM SigV4 auth. Called by AgentCore containers
 that cannot directly access AOSS due to service principal restrictions.
+Also serves a managed OpenSearch domain (vector_store=opensearch), signing
+for ``es`` instead of ``aoss`` based on the endpoint host.
 
 TODO(aoss-proxy): Remove this Lambda when AgentCore natively supports AOSS data-plane access.
 """
@@ -16,7 +18,7 @@ import os
 import re
 
 import boto3
-from coa_common import opensearch_client_kwargs, resolve_region
+from coa_common import opensearch_client_kwargs, opensearch_signing_service, resolve_region
 from opensearchpy import NotFoundError, OpenSearch, RequestsHttpConnection
 from opensearchpy.helpers.signer import RequestsAWSV4SignerAuth
 
@@ -36,7 +38,7 @@ def _get_client() -> OpenSearch:
         credentials = session.get_credentials()
         if not credentials:
             raise RuntimeError("AWS credentials not available")
-        auth = RequestsAWSV4SignerAuth(credentials, _REGION, "aoss")
+        auth = RequestsAWSV4SignerAuth(credentials, _REGION, opensearch_signing_service(_ENDPOINT))
         _client = OpenSearch(
             hosts=[{"host": _ENDPOINT, "port": 443}],
             http_auth=auth,

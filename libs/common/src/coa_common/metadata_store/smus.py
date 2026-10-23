@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from mypy_boto3_datazone import DataZoneClient as DataZoneServiceClient
 
 from .base import AssetResult, MetadataStoreClient, ProjectResult, SearchResult
-from .exceptions import MetadataStoreError
+from .exceptions import MetadataStoreError, MetadataStoreNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -140,21 +140,29 @@ class SMUSClient(MetadataStoreClient):
             raise MetadataStoreError("SMUS API returned no project ID")
         return ProjectResult(project_id=pid, name=resp.get("name", name))
 
-    def delete_project(self, *, project_id: str) -> None:
+    def delete_project(self, *, project_id: str, force: bool = False) -> None:
         """Delete a DataZone project by id.
 
         Args:
             project_id: Identifier of the project to delete.
+            force: Maps to ``skipDeletionCheck``. Without it DataZone raises
+                ``ValidationException`` ("a dependency exists ... asset ...")
+                for a project that still owns assets.
 
         Raises:
-            MetadataStoreError: If the API call fails.
+            MetadataStoreNotFoundError: If the project does not exist.
+            MetadataStoreError: If the API call fails for any other reason.
         """
         try:
             self._client.delete_project(
                 domainIdentifier=self._domain_id,
                 identifier=project_id,
-                skipDeletionCheck=False,
+                skipDeletionCheck=force,
             )
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") == "ResourceNotFoundException":
+                raise MetadataStoreNotFoundError(f"Project {project_id} not found") from exc
+            raise MetadataStoreError(f"Failed to delete project: {exc}") from exc
         except Exception as exc:
             msg = exc.args[0] if exc.args else str(exc)
             raise MetadataStoreError(f"Failed to delete project: {msg}") from exc

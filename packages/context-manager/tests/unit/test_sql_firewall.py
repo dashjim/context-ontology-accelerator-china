@@ -494,6 +494,56 @@ class TestSQLFirewallColumnDenylist:
 
 
 @pytest.mark.unit
+class TestSQLFirewallQualifiedGrantNames:
+    """Grant entries written as ``db.table`` (the form grant-examples.smithy shows)
+    must restrict exactly as the bare name does: the firewall keys a referenced
+    table by its bare name, so a qualified denylist key used to match nothing and
+    the denied columns were readable (fail open)."""
+
+    def test_qualified_denylist_key_denies_column(self):
+        fw = SQLFirewall()
+        sql = "SELECT name, ssn FROM customers"
+        result = fw.evaluate(sql, profile={"columnDenylist": {"sales.customers": ["ssn"]}})
+        assert result.denied
+        assert "customers.ssn" in result.reason
+
+    def test_qualified_denylist_key_denies_column_of_qualified_reference(self):
+        fw = SQLFirewall()
+        sql = "SELECT c.ssn FROM sales.customers c"
+        result = fw.evaluate(sql, profile={"columnDenylist": {"sales.customers": ["ssn"]}})
+        assert result.denied
+
+    def test_qualified_denylist_key_denies_select_star(self):
+        fw = SQLFirewall()
+        result = fw.evaluate("SELECT * FROM customers", profile={"columnDenylist": {'"Sales"."Customers"': ["ssn"]}})
+        assert result.denied
+
+    def test_bare_and_qualified_keys_for_one_table_are_merged(self):
+        """Two keys naming the same table must union, not overwrite each other."""
+        fw = SQLFirewall()
+        profile = {"columnDenylist": {"customers": ["ssn"], "sales.customers": ["email"]}}
+        assert fw.evaluate("SELECT ssn FROM customers", profile=profile).denied
+        assert fw.evaluate("SELECT email FROM customers", profile=profile).denied
+        assert not fw.evaluate("SELECT name FROM customers", profile=profile).denied
+
+    def test_qualified_allowlist_entry_allows_table(self):
+        fw = SQLFirewall()
+        result = fw.evaluate("SELECT id FROM orders", profile={"tableAllowlist": ["sales.orders"]})
+        assert not result.denied
+
+    def test_qualified_allowlist_still_denies_other_tables(self):
+        fw = SQLFirewall()
+        result = fw.evaluate("SELECT * FROM payroll", profile={"tableAllowlist": ["sales.orders"]})
+        assert result.denied
+        assert "payroll" in result.reason
+
+    def test_allowlist_entry_without_table_name_permits_nothing(self):
+        fw = SQLFirewall()
+        result = fw.evaluate("SELECT id FROM orders", profile={"tableAllowlist": ["sales."]})
+        assert result.denied
+
+
+@pytest.mark.unit
 class TestSQLFirewallCaseInsensitivity:
     """Authorization must be case-insensitive — SQL identifiers are case-insensitive
     for unquoted names and case manipulation must not bypass the allowlist/denylist."""

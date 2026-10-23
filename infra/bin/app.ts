@@ -20,6 +20,13 @@ import {
 } from "../lib/utils/agentcore-az";
 import { BrandEnvAspect } from "../lib/utils/brand-env";
 import {
+  resolveBedrockRegion,
+  resolveEdgeWafEnabled,
+  resolveLlmProvider,
+  resolveVectorStore,
+  usesInRegionBedrock,
+} from "../lib/utils/deployment-switches";
+import {
   assertModelIdsInvocableFromRegion,
   parseDeploymentConfig,
   resolveConfiguredModelIds,
@@ -119,12 +126,17 @@ async function deploy(): Promise<void> {
   // Fail fast at synth when a model id — configured or the built-in `us.`
   // default — is a geographic inference profile the deploy region does not
   // publish (#1020). Without this, a non-US deploy with no config reaches
-  // CREATE_COMPLETE and every Bedrock call fails at first invoke.
-  assertModelIdsInvocableFromRegion(
-    resolveConfiguredModelIds(config),
-    deployRegion,
-    configParameterName,
-  );
+  // CREATE_COMPLETE and every Bedrock call fails at first invoke. Native
+  // Bedrock is invoked from bedrock_region when set. On
+  // llm_provider=openai_compatible (the cn- default) the ids map to provider
+  // model names, so there is nothing to check.
+  if (resolveLlmProvider(app) === "bedrock") {
+    assertModelIdsInvocableFromRegion(
+      resolveConfiguredModelIds(config),
+      resolveBedrockRegion(app) ?? deployRegion,
+      configParameterName,
+    );
+  }
   const importingVpc = !!(app.node.tryGetContext("vpc_id") as
     | string
     | undefined);
@@ -136,10 +148,15 @@ async function deploy(): Promise<void> {
     // Runtime ENIs and the AOSS endpoint land on valid zones (e.g. in
     // us-east-1, AgentCore allows {1a,1b,1c} but AOSS only {1b,1c,1d} — the
     // intersection {1b,1c} avoids the 1a endpoint-create failure).
-    const aossAzNames = await resolveEndpointServiceAzNames(
-      deployRegion,
-      `com.amazonaws.${deployRegion}.aoss`,
-    );
+    // vector_store=opensearch (AWS China) creates no AOSS endpoint, so there
+    // is nothing extra to intersect with.
+    const aossAzNames =
+      resolveVectorStore(app) === "aoss"
+        ? await resolveEndpointServiceAzNames(
+            deployRegion,
+            `com.amazonaws.${deployRegion}.aoss`,
+          )
+        : undefined;
     agentCoreAzNames = await resolveAgentCoreAzNames(
       deployRegion,
       2,
@@ -231,7 +248,14 @@ async function deploy(): Promise<void> {
     `${stackPrefix}-auth`,
     authProps,
   );
-  const guardrail = new GuardrailStack(app, `${stackPrefix}-guardrail`);
+  // Bedrock Guardrails exist only where Bedrock does and apply only to Bedrock
+  // calls in the same region, so llm_provider=openai_compatible and
+  // cross-region Bedrock (bedrock_region) skip the stack.
+  // Serve and ontology-engine read its SSM params as optional; doc-kg-build
+  // then gets empty guardrail ids (see sources-stack.ts).
+  if (usesInRegionBedrock(network)) {
+    new GuardrailStack(app, `${stackPrefix}-guardrail`);
+  }
   const storage = new StorageStack(app, `${stackPrefix}-storage`, {
     network,
     allowedOrigin,
@@ -286,6 +310,11 @@ async function deploy(): Promise<void> {
     ...(customDomain && { customDomain }),
     ...(apiWebAclId && { webAclId: apiWebAclId }),
     alarmAction,
+    // An external IdP whose JWKS is not reachable via the issuer's discovery
+    // document (e.g. an issuer the authorizer cannot resolve) needs it here.
+    ...(authProps.oidcSettings?.jwksUri && {
+      jwksUri: authProps.oidcSettings.jwksUri,
+    }),
     vpc: network.vpc,
     rolesTable: authnz.rolesTable,
     resourceRoleMappingsTable: authnz.resourceRoleMappingsTable,
@@ -444,10 +473,12 @@ async function deploy(): Promise<void> {
   api.addDependency(dataLayer);
 
   // CloudFront WebACL: use a caller-provided ARN, else auto-create in
-  // us-east-1 via EdgeWafStack and have WebStack read the ARN from SSM.
+  // us-east-1 via EdgeWafStack and have WebStack read the ARN from SSM —
+  // unless `edge_waf` is off (the cn- default: us-east-1 is outside the aws-cn
+  // partition), which leaves the distribution without a WebACL.
   let edgeWaf: EdgeWafStack | undefined;
   let cfAutoWebAclParam: { name: string; region: string } | undefined;
-  if (!cloudfrontWebAclId && deployAccount) {
+  if (!cloudfrontWebAclId && deployAccount && resolveEdgeWafEnabled(app)) {
     edgeWaf = new EdgeWafStack(app, `${stackPrefix}-edge-waf`, {
       env: { account: deployAccount, region: "us-east-1" },
       webAclArnParameterName: cfWebAclParamName,

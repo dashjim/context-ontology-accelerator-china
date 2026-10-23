@@ -1,6 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+import { Aws } from "aws-cdk-lib";
 import { readFileSync } from "fs";
 
 const HTTP_METHODS = ["get", "put", "post", "delete", "patch", "head"] as const;
@@ -132,7 +133,7 @@ export function injectLambdaProxyIntegrations(
         );
       }
 
-      const uri = `arn:aws:apigateway:${opts.region}:lambda:path/2015-03-31/functions/${lambdaArn}/invocations`;
+      const uri = `arn:${Aws.PARTITION}:apigateway:${opts.region}:lambda:path/2015-03-31/functions/${lambdaArn}/invocations`;
 
       addSecurityResponseHeaders(operation);
 
@@ -161,7 +162,7 @@ export function fillAuthorizerParameters(
     unsecuredPaths?: string[];
   },
 ): Record<string, any> {
-  const invokeUri = `arn:aws:apigateway:${opts.region}:lambda:path/2015-03-31/functions/${opts.authorizerLambdaArn}/invocations`;
+  const invokeUri = `arn:${Aws.PARTITION}:apigateway:${opts.region}:lambda:path/2015-03-31/functions/${opts.authorizerLambdaArn}/invocations`;
   const unsecured = new Set(opts.unsecuredPaths ?? []);
 
   const schemes = spec.components?.securitySchemes ?? {};

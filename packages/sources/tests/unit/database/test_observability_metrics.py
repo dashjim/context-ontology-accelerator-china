@@ -124,7 +124,7 @@ class TestCatalogAssetWritesMetric:
 
         with (
             patch(f"{_WRITER}.emit_metric") as mock_emit,
-            patch(f"{_WRITER}.SMUSClient", MagicMock(return_value=mock_client)),
+            patch(f"{_WRITER}.build_metadata_store_client", MagicMock(return_value=mock_client)),
             patch(f"{_WRITER}.build_forms_input", return_value=[]),
         ):
             result = write_to_datazone(
@@ -149,7 +149,7 @@ class TestCatalogAssetWritesMetric:
 
         with (
             patch(f"{_WRITER}.emit_metric") as mock_emit,
-            patch(f"{_WRITER}.SMUSClient", MagicMock(return_value=mock_client)),
+            patch(f"{_WRITER}.build_metadata_store_client", MagicMock(return_value=mock_client)),
             patch(f"{_WRITER}.build_forms_input", return_value=[]),
         ):
             write_to_datazone(

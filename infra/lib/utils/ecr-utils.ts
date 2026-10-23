@@ -1,11 +1,38 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+import * as cdk from "aws-cdk-lib";
+import * as bedrockagentcore from "aws-cdk-lib/aws-bedrockagentcore";
+
+/**
+ * `AgentRuntimeArtifact.fromImageUri` that also accepts China ECR URIs.
+ *
+ * The L2 checks a literal container URI twice (in `fromImageUri` and again
+ * when `Runtime` renders it) against a pattern that hard-codes the commercial
+ * `.amazonaws.com` host, so a `*.dkr.ecr.cn-north-1.amazonaws.com.cn` URI
+ * fails synth. Both checks skip unresolved tokens, so a China URI is wrapped
+ * in a Lazy that resolves to the same literal string — the template is
+ * unchanged. Every other URI goes through the L2 untouched and keeps its
+ * validation.
+ */
+export function agentRuntimeArtifactFromImageUri(
+  imageUri: string,
+): bedrockagentcore.AgentRuntimeArtifact {
+  const isChinaEcrHost =
+    !cdk.Token.isUnresolved(imageUri) &&
+    /^\d{12}\.dkr\.ecr\.cn-[a-z0-9-]+\.amazonaws\.com\.cn\//.test(imageUri);
+  return bedrockagentcore.AgentRuntimeArtifact.fromImageUri(
+    isChinaEcrHost ? cdk.Lazy.string({ produce: () => imageUri }) : imageUri,
+  );
+}
+
 /**
  * Parse an ECR image URI into its component parts.
  *
  * @param imageUri - Full ECR image URI, e.g.
  *   `123456789012.dkr.ecr.us-east-1.amazonaws.com/my-repo:latest`
+ *   (China regions use the `amazonaws.com.cn` suffix; the ARN partition is
+ *   derived from the region).
  * @throws Error if the URI format is invalid.
  */
 export function parseEcrImageUri(imageUri: string): {
@@ -38,6 +65,11 @@ export function parseEcrImageUri(imageUri: string): {
 
   const accountId = hostParts[0];
   const region = hostParts[3];
+  const partition = region.startsWith("cn-")
+    ? "aws-cn"
+    : region.startsWith("us-gov-")
+      ? "aws-us-gov"
+      : "aws";
 
   const colonIndex = imageRef.lastIndexOf(":");
   const repositoryName =
@@ -55,6 +87,6 @@ export function parseEcrImageUri(imageUri: string): {
     region,
     repositoryName,
     tag,
-    repositoryArn: `arn:aws:ecr:${region}:${accountId}:repository/${repositoryName}`,
+    repositoryArn: `arn:${partition}:ecr:${region}:${accountId}:repository/${repositoryName}`,
   };
 }

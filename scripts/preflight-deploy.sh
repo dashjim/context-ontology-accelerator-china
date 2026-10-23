@@ -109,6 +109,32 @@ if [ -n "$CONTAINER_ENGINE" ]; then
   fi
 fi
 
+# ── 3c. AMD64 image builds on an arm64 host (ontology, sources tasks) ─────
+# The ontology, db-enrichment, kg-build and preprocessing images pin
+# linux/amd64. Without buildx, Docker's legacy builder ignores --platform and
+# installs arm64 packages, failing with "does not provide the specified
+# platform (linux/amd64)". Ubuntu's qemu-user-static 8.x also crashes with
+# "QEMU internal SIGSEGV" running Debian trixie amd64 binaries; register a
+# newer QEMU (tonistiigi/binfmt ships 10.x).
+if [ "$CONTAINER_ENGINE" = "docker" ] && ! docker buildx version >/dev/null 2>&1; then
+  err "docker buildx is not installed — the legacy builder cannot build linux/amd64 images on this host (Ubuntu: apt install docker-buildx)"
+fi
+if [ -n "$CONTAINER_ENGINE" ] && [ "$(uname -s)" = "Linux" ] \
+  && { [ "$(uname -m)" = "aarch64" ] || [ "$(uname -m)" = "arm64" ]; }; then
+  _x86_bf=/proc/sys/fs/binfmt_misc/qemu-x86_64
+  if ! { [ -f "$_x86_bf" ] && head -n 1 "$_x86_bf" | grep -q '^enabled'; }; then
+    err "No qemu-x86_64 binfmt handler — linux/amd64 images cannot build on this arm64 host. Register emulation: docker run --privileged --rm tonistiigi/binfmt --install amd64"
+  else
+    _x86_interp="$(sed -n 's/^interpreter //p' "$_x86_bf")"
+    _x86_qemu_major="$("$_x86_interp" --version 2>/dev/null | sed -n 's/.*version \([0-9][0-9]*\)\..*/\1/p' | head -n 1)"
+    if [ -n "$_x86_qemu_major" ] && [ "$_x86_qemu_major" -lt 9 ]; then
+      warn "qemu-x86_64 $_x86_qemu_major.x is registered; QEMU 8.x is known to SIGSEGV building trixie amd64 images. Replace it: docker run --privileged --rm tonistiigi/binfmt --uninstall qemu-x86_64 && docker run --privileged --rm tonistiigi/binfmt --install amd64"
+    else
+      ok "amd64 emulation available (qemu-x86_64 binfmt registered${_x86_qemu_major:+, QEMU $_x86_qemu_major.x})"
+    fi
+  fi
+fi
+
 # ── 4. Smithy-generated artifacts present AND current ────────────────────
 # smithy-generated/ is gitignored, so `git pull` leaves it at the previous
 # commit's output. Checking only that specs exist would ship handlers against a
@@ -135,6 +161,18 @@ if [ "$SMITHY_STATE" = missing ] || [ "$SMITHY_STATE" = unstamped ] || [ "$SMITH
     err "'make generate' failed. Fix Smithy/Gradle errors above before deploying."
   fi
 fi
+
+# Resolution order matches CDK's own precedence (infra/bin/app.ts uses
+# CDK_DEFAULT_REGION as the source of truth) so preflight validates the
+# same region CDK will actually deploy to.
+REGION="${CDK_DEFAULT_REGION:-${AWS_DEFAULT_REGION:-${AWS_REGION:-us-east-1}}}"
+
+# Value of CDK context KEY passed through SCL_EXTRA_CONTEXT (see deploy.sh) as
+# `-c KEY=VALUE` / `--context KEY=VALUE`; returns 1 when KEY is not passed.
+_extra_context() {
+  _ec_kv="$(printf '%s\n' ${SCL_EXTRA_CONTEXT:-} | grep "^$1=" | tail -n 1)" || return 1
+  printf '%s\n' "${_ec_kv#*=}"
+}
 
 # ── 5. ECR Public authentication ─────────────────────────────────────────
 # The build pulls base images from ECR Public (hosted only in us-east-1,
@@ -180,7 +218,11 @@ _ecr_cred_helper() {
   return 1
 }
 
-if [ -n "${CONTAINER_ENGINE:-}" ]; then
+# AWS China credentials cannot get an ECR Public token (us-east-1 is another
+# partition); anonymous pulls work from China, so there is nothing to log in to.
+if [[ "$REGION" == cn-* ]]; then
+  ok "ECR Public: anonymous base image pulls from $REGION — skipping explicit login"
+elif [ -n "${CONTAINER_ENGINE:-}" ]; then
   if command -v aws >/dev/null 2>&1 && aws sts get-caller-identity >/dev/null 2>&1; then
     if ECR_HELPER="$(_ecr_cred_helper)"; then
       ok "ECR Public auth handled by credential helper ($ECR_HELPER) — skipping explicit login"
@@ -207,11 +249,16 @@ else
 fi
 
 # ── 6. VPC limit check (requires AWS credentials) ────────────────────────
-# Resolution order matches CDK's own precedence (infra/bin/app.ts uses
-# CDK_DEFAULT_REGION as the source of truth) so preflight validates the
-# same region CDK will actually deploy to.
-REGION="${CDK_DEFAULT_REGION:-${AWS_DEFAULT_REGION:-${AWS_REGION:-us-east-1}}}"
-if command -v aws >/dev/null 2>&1 && aws sts get-caller-identity >/dev/null 2>&1; then
+# A redeploy reuses the VPC the network stack already created (and SCL_VPC_ID
+# imports one), so only a first deploy needs a free VPC slot.
+_COA_VPC_NAME="${SCL_PREFIX:-coa}-${ENV:-dev}-vpc"
+if [ -n "${SCL_VPC_ID:-}" ]; then
+  ok "Importing VPC ${SCL_VPC_ID} — no new VPC needed"
+elif command -v aws >/dev/null 2>&1 && aws sts get-caller-identity >/dev/null 2>&1 \
+  && [ "$(aws ec2 describe-vpcs --region "$REGION" --filters "Name=tag:Name,Values=$_COA_VPC_NAME" \
+          --query 'length(Vpcs)' --output text 2>/dev/null || echo 0)" -gt 0 ]; then
+  ok "VPC $_COA_VPC_NAME already exists in $REGION — no new VPC needed"
+elif command -v aws >/dev/null 2>&1 && aws sts get-caller-identity >/dev/null 2>&1; then
   VPC_COUNT=$(aws ec2 describe-vpcs --region "$REGION" --query 'length(Vpcs)' --output text 2>/dev/null || echo "?")
   VPC_LIMIT_RAW=$(aws service-quotas get-service-quota --service-code vpc --quota-code L-F678F1CE --region "$REGION" --query 'Quota.Value' --output text 2>/dev/null || echo "5")
   VPC_LIMIT="${VPC_LIMIT_RAW%%.*}"
@@ -269,9 +316,17 @@ fi
 # BOTH regions bootstrapped. Without this the deploy runs for a long while and
 # then fails on that one stack with a bootstrap error — the docs showed a single
 # `cdk bootstrap <REGION>` and never mentioned the second one.
+# cn- regions deploy no *-edge-waf stack (CDK context edge_waf defaults off
+# there: us-east-1 is outside the aws-cn partition), so they need only REGION.
 if command -v aws >/dev/null 2>&1 && aws sts get-caller-identity >/dev/null 2>&1; then
   _bootstrap_regions="$REGION"
-  [ "$REGION" != "us-east-1" ] && _bootstrap_regions="$REGION us-east-1"
+  _edge_waf="$(_extra_context edge_waf)" || _edge_waf=false
+  _edge_waf="$(printf '%s' "$_edge_waf" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$REGION" == cn-* ]] && [[ "$_edge_waf" =~ ^(false|0|off|no)$ ]]; then
+    ok "No *-edge-waf stack in $REGION (edge_waf off) — us-east-1 bootstrap not needed"
+  elif [ "$REGION" != "us-east-1" ]; then
+    _bootstrap_regions="$REGION us-east-1"
+  fi
   for _bsr in $_bootstrap_regions; do
     if aws cloudformation describe-stacks --stack-name CDKToolkit --region "$_bsr" \
         >/dev/null 2>&1; then
@@ -311,6 +366,28 @@ _DEFAULT_EMBED_MODEL_ID="us.cohere.embed-v4:0"
 _DEFAULT_INDUCTION_MODEL_ID="us.anthropic.claude-sonnet-5"
 _DEFAULT_CHAT_MODEL_ID="us.anthropic.claude-haiku-4-5-20251001-v1:0"
 _CONFIG_PARAM="/${SCL_PREFIX:-coa}/config"
+
+# LLM backend — llm_provider in bin/app.ts: the CDK context value when passed,
+# else openai_compatible in cn- regions (AWS China has no Bedrock), else bedrock.
+if _LLM_PROVIDER="$(_extra_context llm_provider)"; then
+  _LLM_PROVIDER="$(printf '%s' "$_LLM_PROVIDER" | tr '[:upper:]' '[:lower:]')"
+elif [[ "$REGION" == cn-* ]]; then
+  _LLM_PROVIDER="openai_compatible"
+else
+  _LLM_PROVIDER="bedrock"
+fi
+
+# Region the stacks invoke Bedrock in — bedrock_region in bin/app.ts: the CDK
+# context value when passed (empty or `none` = the deploy region), else the
+# deploy region (no cn- default: a China deployment must not call Bedrock in a
+# commercial region).
+if _BEDROCK_REGION="$(_extra_context bedrock_region)"; then
+  case "$(printf '%s' "$_BEDROCK_REGION" | tr '[:upper:]' '[:lower:]')" in
+    ""|none) _BEDROCK_REGION="$REGION" ;;
+  esac
+else
+  _BEDROCK_REGION="$REGION"
+fi
 
 # Geographies (as inference-profile prefixes) whose profiles are published in
 # a region. Mirrors regionGeographies() in infra/lib/utils/model-region.ts —
@@ -392,7 +469,11 @@ _coa_resolve_model_ids() {
   ' "$1"
 }
 
-if command -v aws >/dev/null 2>&1 \
+if [ "$_LLM_PROVIDER" = "openai_compatible" ]; then
+  # bin/app.ts skips the same check: OPENAI_COMPAT_* map the Bedrock-style IDs
+  # to provider model names.
+  ok "LLM calls use the OpenAI-compatible provider (llm_provider=openai_compatible) — skipping Bedrock model-ID validation"
+elif command -v aws >/dev/null 2>&1 \
     && aws sts get-caller-identity >/dev/null 2>&1; then
   if _cfg_json="$(aws ssm get-parameter --name "$_CONFIG_PARAM" --region "$REGION" \
       --query 'Parameter.Value' --output text 2>&1)"; then
@@ -416,13 +497,21 @@ if command -v aws >/dev/null 2>&1 \
     fi
   fi
   if [ -n "${_effective:-}" ]; then
-    _geos="$(_coa_region_geographies "$REGION")"
-    _profiles="$(aws bedrock list-inference-profiles --region "$REGION" \
-      --query 'inferenceProfileSummaries[].inferenceProfileId' --output text 2>/dev/null || echo "")"
-    _models="$(aws bedrock list-foundation-models --region "$REGION" \
-      --query 'modelSummaries[].modelId' --output text 2>/dev/null || echo "")"
-    if [ -z "$_profiles" ] && [ -z "$_models" ]; then
-      warn "Could not list Bedrock models in $REGION — skipping the availability check"
+    _geos="$(_coa_region_geographies "$_BEDROCK_REGION")"
+    _profiles=""
+    _models=""
+    if [ "$_BEDROCK_REGION" = "$REGION" ]; then
+      _profiles="$(aws bedrock list-inference-profiles --region "$REGION" \
+        --query 'inferenceProfileSummaries[].inferenceProfileId' --output text 2>/dev/null || echo "")"
+      _models="$(aws bedrock list-foundation-models --region "$REGION" \
+        --query 'modelSummaries[].modelId' --output text 2>/dev/null || echo "")"
+      if [ -z "$_profiles" ] && [ -z "$_models" ]; then
+        warn "Could not list Bedrock models in $REGION — skipping the availability check"
+      fi
+    else
+      # Cross-region Bedrock authenticates with a Bedrock API key, not the
+      # deploy credentials, so those cannot be relied on to list the models.
+      ok "Bedrock is invoked in $_BEDROCK_REGION (bedrock_region) — validating model IDs against it, skipping the model listing"
     fi
     while IFS="$(printf '\t')" read -r _key _mid _origin; do
       [ -n "$_key" ] || continue
@@ -432,8 +521,8 @@ if command -v aws >/dev/null 2>&1 \
       esac
       _geo="$(_coa_model_geo_prefix "$_mid")"
       if [ -n "$_geo" ] && ! printf ' %s ' "$_geos" | grep -qF " $_geo "; then
-        err "$_key '$_mid' is a '$_geo.' inference profile, which Bedrock does not publish in $REGION ($_from)."
-        echo "       fix: set $_key in $_CONFIG_PARAM to a profile published in $REGION (${_geos:-no geographic profiles here}) or the bare in-region model ID." >&2
+        err "$_key '$_mid' is a '$_geo.' inference profile, which Bedrock does not publish in $_BEDROCK_REGION ($_from)."
+        echo "       fix: set $_key in $_CONFIG_PARAM to a profile published in $_BEDROCK_REGION (${_geos:-no geographic profiles here}) or the bare in-region model ID." >&2
         continue
       fi
       if [ -n "$_profiles" ] || [ -n "$_models" ]; then

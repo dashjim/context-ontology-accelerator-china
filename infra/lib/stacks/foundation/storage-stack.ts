@@ -4,6 +4,7 @@
 import * as cdk from "aws-cdk-lib";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as neptune from "aws-cdk-lib/aws-neptune";
+import * as opensearch from "aws-cdk-lib/aws-opensearchservice";
 import * as opensearchserverless from "aws-cdk-lib/aws-opensearchserverless";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import * as ssm from "aws-cdk-lib/aws-ssm";
@@ -13,6 +14,11 @@ import { SCLStack } from "../../constructs/scl-stack";
 import { AccessLogsBucket } from "../../constructs";
 import { VECTOR_COLLECTION_SUFFIX } from "../../constants";
 import { resolveContext } from "../../context";
+import {
+  resolveVectorStore,
+  vectorStoreDomainArn,
+  vectorStoreDomainName,
+} from "../../utils/deployment-switches";
 import { NetworkStack } from "./network-stack";
 
 /**
@@ -21,7 +27,10 @@ import { NetworkStack } from "./network-stack";
  *
  * Neptune uses L1 (Cfn) constructs with IAM authentication enabled.
  * OpenSearch uses Serverless (VECTORSEARCH collection type) for
- * auto-scaling and pay-per-use in dev.
+ * auto-scaling and pay-per-use in dev. With `vector_store=opensearch`
+ * (default in AWS China, which has no Serverless) it is a small single-node
+ * managed OpenSearch Service domain in the VPC instead, published through the
+ * same `/opensearch/*` SSM parameters.
  */
 
 export interface StorageStackProps extends cdk.StackProps {
@@ -47,13 +56,13 @@ export class StorageStack extends SCLStack {
   /** Neptune cluster resource ARN (for IAM policies). */
   public readonly neptuneClusterArn: string;
 
-  /** OpenSearch Serverless collection endpoint. */
+  /** OpenSearch Serverless collection (or managed domain) endpoint URL. */
   public readonly opensearchEndpoint: string;
 
-  /** OpenSearch Serverless collection name. */
+  /** OpenSearch Serverless collection name; the index-name prefix on a domain. */
   public readonly opensearchCollectionName: string;
 
-  /** OpenSearch Serverless collection ARN (for IAM policies). */
+  /** OpenSearch Serverless collection (or managed domain) ARN. */
   public readonly opensearchCollectionArn: string;
 
   /** S3 bucket for Athena query results. */
@@ -137,7 +146,7 @@ export class StorageStack extends SCLStack {
 
     // Neptune IAM data-access ARN uses the cluster *resource* ID
     // (e.g. cluster-ABCD1234...), NOT the cluster identifier.
-    // Format: arn:aws:neptune-db:{region}:{account}:{cluster-resource-id}/*
+    // Format: arn:{partition}:neptune-db:{region}:{account}:{cluster-resource-id}/*
     this.neptuneClusterArn = this.formatArn({
       service: "neptune-db",
       resource: neptuneCluster.attrClusterResourceId,
@@ -145,185 +154,23 @@ export class StorageStack extends SCLStack {
       arnFormat: cdk.ArnFormat.SLASH_RESOURCE_NAME,
     });
 
-    // =====================================================================
-    //  OpenSearch Serverless  (VECTORSEARCH collection)
-    //
-    //  AOSS requires separate encryption, network, and data-access policies
-    //  (not standard IAM resource policies).
-    // =====================================================================
-    // OpenSearch Serverless — NEXTGEN Collection Group
-    //
-    // Uses NEXTGEN generation for improved indexing performance, lower latency,
-    // and support for larger vector dimensions. The Collection Group provides:
-    // - NEXTGEN generation: 2x indexing throughput, sub-100ms p99 search latency
-    // - Standby replicas: must be ENABLED for NEXTGEN (AWS rejects DISABLED).
-    //   NEXTGEN strict mode rejects knn_vector method blocks — catches regressions.
-    // - Capacity limits: min 2 OCU (default, override via `aoss_min_ocu`; set 0
-    //   for NextGen scale-to-zero), max 96 OCU (cost cap)
-    //
-    // BREAKING CHANGE: Collection renamed to {prefix}-vector-store.
-    // This creates a new collection — existing vector embeddings must be re-ingested
-    // via the Scan pipeline. Vector data is derived (not source-of-truth), so no
-    // data migration is needed — re-run ingestion against existing source documents.
-    // =====================================================================
-
     const collectionName = this.prefixed(VECTOR_COLLECTION_SUFFIX);
-
-    // Encryption policy - required before collection creation
-    const encryptionPolicy = new opensearchserverless.CfnSecurityPolicy(
-      this,
-      "OSSEncryptionPolicy",
-      {
-        name: this.prefixed("encryption"),
-        type: "encryption",
-        policy: JSON.stringify({
-          Rules: [
-            {
-              ResourceType: "collection",
-              Resource: [`collection/${collectionName}`],
-            },
-          ],
-          AWSOwnedKey: true,
-        }),
-      },
-    );
-
-    // Network policy — VPC-only access via standard EC2 Interface Endpoint (NextGen)
-    const networkRules = [
-      {
-        Rules: [
-          {
-            ResourceType: "collection",
-            Resource: [`collection/${collectionName}`],
-          },
-          {
-            ResourceType: "dashboard",
-            Resource: [`collection/${collectionName}`],
-          },
-        ],
-        SourceVPCEs: [network.aossVpcEndpointId],
-      },
-    ];
-
-    // Dev only: allow public access for integration tests run from developer laptops and CICD pipeline.
-    // All other environments (tst, demo, prod) are VPC-only.
-    if (this.envName === "dev") {
-      networkRules.push({
-        Rules: [
-          {
-            ResourceType: "collection",
-            Resource: [`collection/${collectionName}`],
-          },
-        ],
-        AllowFromPublic: true,
-      } as any);
-    }
-
-    const networkPolicy = new opensearchserverless.CfnSecurityPolicy(
-      this,
-      "OSSNetworkPolicy",
-      {
-        name: this.prefixed("network"),
-        type: "network",
-        policy: JSON.stringify(networkRules),
-      },
-    );
-
-    const maxOcu = Number(this.node.tryGetContext("aoss_max_ocu") ?? 96);
-    // NEXTGEN valid min OCU values: 0, 2, 4, 8, 16, or multiples of 16.
-    const minOcu = Number(this.node.tryGetContext("aoss_min_ocu") ?? 2);
-
-    // Validate min/max OCU explicitly rather than passing an arbitrary
-    // `-c aoss_min_ocu=<n>` straight through to CloudFormation. Two failure
-    // modes this guards against (see #173):
-    //   1. An out-of-range value (e.g. 3, 6, or negative) is only rejected
-    //      LATER by CloudFormation with an opaque error, after a slow stack
-    //      update.
-    //   2. minOcu=0 is a VALID value but has a correctness consequence: it lets
-    //      the collection scale indexing capacity to zero, so under load the
-    //      NEXTGEN circuit breaker sheds bulk writes with 429s. That is exactly
-    //      the condition that produced the #173 silent partial-index. It is
-    //      permitted (useful for cost in dev) but must be a DELIBERATE choice —
-    //      we emit a loud synth-time warning so nobody sets it unaware that
-    //      ingest can now be throttled into partial writes (the runtime path
-    //      fails loud rather than silently after the #173 fix, but 0 makes it
-    //      fire far more often).
-    //
-    // NEXTGEN valid OCU values (both min and max): 0, 2, 4, 8, 16, or a
-    // multiple of 16, up to a maximum of 1696 (per AWS collection-group
-    // capacity limits). max additionally cannot be 0 (it is a ceiling).
-    const MAX_OCU_LIMIT = 1696;
-    const BASE_VALID_OCU = new Set([0, 2, 4, 8, 16]);
-    const isValidOcuValue = (v: number) =>
-      Number.isInteger(v) &&
-      v >= 0 &&
-      v <= MAX_OCU_LIMIT &&
-      (BASE_VALID_OCU.has(v) || (v > 16 && v % 16 === 0));
-    if (!isValidOcuValue(minOcu)) {
-      throw new Error(
-        `aoss_min_ocu=${this.node.tryGetContext("aoss_min_ocu")} is invalid. ` +
-          `NEXTGEN min OCU must be 0, 2, 4, 8, 16, or a multiple of 16, up to ${MAX_OCU_LIMIT}.`,
+    if (resolveVectorStore(this) === "opensearch") {
+      const domain = this.createVectorStoreDomain(
+        network,
+        privateSubnets.subnetIds[0],
       );
-    }
-    if (!isValidOcuValue(maxOcu) || maxOcu < 2) {
-      throw new Error(
-        `aoss_max_ocu=${this.node.tryGetContext("aoss_max_ocu")} is invalid. ` +
-          `NEXTGEN max OCU must be 2, 4, 8, 16, or a multiple of 16, up to ${MAX_OCU_LIMIT}.`,
+      this.opensearchEndpoint = `https://${domain.attrDomainEndpoint}`;
+      this.opensearchCollectionArn = domain.attrArn;
+    } else {
+      const collection = this.createVectorStoreCollection(
+        network,
+        collectionName,
       );
+      this.opensearchEndpoint = collection.attrCollectionEndpoint;
+      this.opensearchCollectionArn = collection.attrArn;
     }
-    if (minOcu > maxOcu) {
-      throw new Error(
-        `aoss_min_ocu (${minOcu}) cannot exceed aoss_max_ocu (${maxOcu}).`,
-      );
-    }
-    if (minOcu === 0) {
-      cdk.Annotations.of(this).addWarning(
-        `AOSS min OCU is 0: indexing capacity can scale to zero, so under load the ` +
-          `NEXTGEN circuit breaker sheds bulk writes with HTTP 429. Ingest re-submits and ` +
-          `now fails LOUD on unrecoverable partial writes (see #173), but 0 makes throttling ` +
-          `far more likely. Use a non-zero floor (e.g. 2) for ingest-heavy environments.`,
-      );
-    }
-
-    // NEXTGEN collection groups require standbyReplicas=ENABLED.
-    // AWS rejects DISABLED for NEXTGEN generation (replicas managed internally).
-    const cfnCollectionGroup = new opensearchserverless.CfnCollectionGroup(
-      this,
-      "VectorStoreGroup",
-      {
-        name: this.prefixed("vector-store-group"),
-        standbyReplicas: "ENABLED",
-        generation: "NEXTGEN",
-        capacityLimits: {
-          maxIndexingCapacityInOcu: maxOcu,
-          maxSearchCapacityInOcu: maxOcu,
-          minIndexingCapacityInOcu: minOcu,
-          minSearchCapacityInOcu: minOcu,
-        },
-        description:
-          "Group for SemanticContext vector store for embeddings and similarity search",
-      },
-    );
-    // TODO: Consider adding custom resource with SDK waiter that polls collection
-    // status until ACTIVE for prod deployments
-    const collection = new opensearchserverless.CfnCollection(
-      this,
-      "VectorStore",
-      {
-        name: collectionName,
-        collectionGroupName: cfnCollectionGroup.name,
-        type: "VECTORSEARCH",
-        description:
-          "SemanticContext vector store for embeddings and similarity search",
-      },
-    );
-    collection.addDependency(cfnCollectionGroup);
-    collection.addDependency(encryptionPolicy);
-    collection.addDependency(networkPolicy);
-
-    this.opensearchEndpoint = collection.attrCollectionEndpoint;
     this.opensearchCollectionName = collectionName;
-    this.opensearchCollectionArn = collection.attrArn;
 
     // =====================================================================
     //  Athena Query Buckets
@@ -485,5 +332,248 @@ export class StorageStack extends SCLStack {
       value: this.athenaSpillBucket.bucketName,
       description: "Athena federated connector spill bucket",
     });
+  }
+
+  private createVectorStoreCollection(
+    network: NetworkStack,
+    collectionName: string,
+  ): opensearchserverless.CfnCollection {
+    // =====================================================================
+    //  OpenSearch Serverless  (VECTORSEARCH collection)
+    //
+    //  AOSS requires separate encryption, network, and data-access policies
+    //  (not standard IAM resource policies).
+    // =====================================================================
+    // OpenSearch Serverless — NEXTGEN Collection Group
+    //
+    // Uses NEXTGEN generation for improved indexing performance, lower latency,
+    // and support for larger vector dimensions. The Collection Group provides:
+    // - NEXTGEN generation: 2x indexing throughput, sub-100ms p99 search latency
+    // - Standby replicas: must be ENABLED for NEXTGEN (AWS rejects DISABLED).
+    //   NEXTGEN strict mode rejects knn_vector method blocks — catches regressions.
+    // - Capacity limits: min 2 OCU (default, override via `aoss_min_ocu`; set 0
+    //   for NextGen scale-to-zero), max 96 OCU (cost cap)
+    //
+    // BREAKING CHANGE: Collection renamed to {prefix}-vector-store.
+    // This creates a new collection — existing vector embeddings must be re-ingested
+    // via the Scan pipeline. Vector data is derived (not source-of-truth), so no
+    // data migration is needed — re-run ingestion against existing source documents.
+    // =====================================================================
+
+    // Encryption policy - required before collection creation
+    const encryptionPolicy = new opensearchserverless.CfnSecurityPolicy(
+      this,
+      "OSSEncryptionPolicy",
+      {
+        name: this.prefixed("encryption"),
+        type: "encryption",
+        policy: JSON.stringify({
+          Rules: [
+            {
+              ResourceType: "collection",
+              Resource: [`collection/${collectionName}`],
+            },
+          ],
+          AWSOwnedKey: true,
+        }),
+      },
+    );
+
+    // Network policy — VPC-only access via standard EC2 Interface Endpoint (NextGen)
+    const networkRules = [
+      {
+        Rules: [
+          {
+            ResourceType: "collection",
+            Resource: [`collection/${collectionName}`],
+          },
+          {
+            ResourceType: "dashboard",
+            Resource: [`collection/${collectionName}`],
+          },
+        ],
+        SourceVPCEs: [network.aossVpcEndpointId],
+      },
+    ];
+
+    // Dev only: allow public access for integration tests run from developer laptops and CICD pipeline.
+    // All other environments (tst, demo, prod) are VPC-only.
+    if (this.envName === "dev") {
+      networkRules.push({
+        Rules: [
+          {
+            ResourceType: "collection",
+            Resource: [`collection/${collectionName}`],
+          },
+        ],
+        AllowFromPublic: true,
+      } as any);
+    }
+
+    const networkPolicy = new opensearchserverless.CfnSecurityPolicy(
+      this,
+      "OSSNetworkPolicy",
+      {
+        name: this.prefixed("network"),
+        type: "network",
+        policy: JSON.stringify(networkRules),
+      },
+    );
+
+    const maxOcu = Number(this.node.tryGetContext("aoss_max_ocu") ?? 96);
+    // NEXTGEN valid min OCU values: 0, 2, 4, 8, 16, or multiples of 16.
+    const minOcu = Number(this.node.tryGetContext("aoss_min_ocu") ?? 2);
+
+    // Validate min/max OCU explicitly rather than passing an arbitrary
+    // `-c aoss_min_ocu=<n>` straight through to CloudFormation. Two failure
+    // modes this guards against (see #173):
+    //   1. An out-of-range value (e.g. 3, 6, or negative) is only rejected
+    //      LATER by CloudFormation with an opaque error, after a slow stack
+    //      update.
+    //   2. minOcu=0 is a VALID value but has a correctness consequence: it lets
+    //      the collection scale indexing capacity to zero, so under load the
+    //      NEXTGEN circuit breaker sheds bulk writes with 429s. That is exactly
+    //      the condition that produced the #173 silent partial-index. It is
+    //      permitted (useful for cost in dev) but must be a DELIBERATE choice —
+    //      we emit a loud synth-time warning so nobody sets it unaware that
+    //      ingest can now be throttled into partial writes (the runtime path
+    //      fails loud rather than silently after the #173 fix, but 0 makes it
+    //      fire far more often).
+    //
+    // NEXTGEN valid OCU values (both min and max): 0, 2, 4, 8, 16, or a
+    // multiple of 16, up to a maximum of 1696 (per AWS collection-group
+    // capacity limits). max additionally cannot be 0 (it is a ceiling).
+    const MAX_OCU_LIMIT = 1696;
+    const BASE_VALID_OCU = new Set([0, 2, 4, 8, 16]);
+    const isValidOcuValue = (v: number) =>
+      Number.isInteger(v) &&
+      v >= 0 &&
+      v <= MAX_OCU_LIMIT &&
+      (BASE_VALID_OCU.has(v) || (v > 16 && v % 16 === 0));
+    if (!isValidOcuValue(minOcu)) {
+      throw new Error(
+        `aoss_min_ocu=${this.node.tryGetContext("aoss_min_ocu")} is invalid. ` +
+          `NEXTGEN min OCU must be 0, 2, 4, 8, 16, or a multiple of 16, up to ${MAX_OCU_LIMIT}.`,
+      );
+    }
+    if (!isValidOcuValue(maxOcu) || maxOcu < 2) {
+      throw new Error(
+        `aoss_max_ocu=${this.node.tryGetContext("aoss_max_ocu")} is invalid. ` +
+          `NEXTGEN max OCU must be 2, 4, 8, 16, or a multiple of 16, up to ${MAX_OCU_LIMIT}.`,
+      );
+    }
+    if (minOcu > maxOcu) {
+      throw new Error(
+        `aoss_min_ocu (${minOcu}) cannot exceed aoss_max_ocu (${maxOcu}).`,
+      );
+    }
+    if (minOcu === 0) {
+      cdk.Annotations.of(this).addWarning(
+        `AOSS min OCU is 0: indexing capacity can scale to zero, so under load the ` +
+          `NEXTGEN circuit breaker sheds bulk writes with HTTP 429. Ingest re-submits and ` +
+          `now fails LOUD on unrecoverable partial writes (see #173), but 0 makes throttling ` +
+          `far more likely. Use a non-zero floor (e.g. 2) for ingest-heavy environments.`,
+      );
+    }
+
+    // NEXTGEN collection groups require standbyReplicas=ENABLED.
+    // AWS rejects DISABLED for NEXTGEN generation (replicas managed internally).
+    const cfnCollectionGroup = new opensearchserverless.CfnCollectionGroup(
+      this,
+      "VectorStoreGroup",
+      {
+        name: this.prefixed("vector-store-group"),
+        standbyReplicas: "ENABLED",
+        generation: "NEXTGEN",
+        capacityLimits: {
+          maxIndexingCapacityInOcu: maxOcu,
+          maxSearchCapacityInOcu: maxOcu,
+          minIndexingCapacityInOcu: minOcu,
+          minSearchCapacityInOcu: minOcu,
+        },
+        description:
+          "Group for SemanticContext vector store for embeddings and similarity search",
+      },
+    );
+    // TODO: Consider adding custom resource with SDK waiter that polls collection
+    // status until ACTIVE for prod deployments
+    const collection = new opensearchserverless.CfnCollection(
+      this,
+      "VectorStore",
+      {
+        name: collectionName,
+        collectionGroupName: cfnCollectionGroup.name,
+        type: "VECTORSEARCH",
+        description:
+          "SemanticContext vector store for embeddings and similarity search",
+      },
+    );
+    collection.addDependency(cfnCollectionGroup);
+    collection.addDependency(encryptionPolicy);
+    collection.addDependency(networkPolicy);
+
+    return collection;
+  }
+
+  /**
+   * Managed OpenSearch Service domain (`vector_store=opensearch`), sized for
+   * test/demo: one t3.small.search data node (override with
+   * `-c opensearch_instance_type=...`, e.g. t3.medium.search for more k-NN
+   * memory), single AZ, 10 GiB gp3. VPC-only behind the AOSS SG, encrypted at
+   * rest and node-to-node, HTTPS-only. No fine-grained access control: the
+   * access policy delegates to IAM in this account, so callers SigV4-sign for
+   * `es` and are authorized by their own `es:ESHttp*` grants.
+   */
+  private createVectorStoreDomain(
+    network: NetworkStack,
+    subnetId: string,
+  ): opensearch.CfnDomain {
+    const domainName = vectorStoreDomainName(this);
+    // Domain names: 3-28 chars, lowercase letter first, then [a-z0-9-].
+    if (!/^[a-z][a-z0-9-]{2,27}$/.test(domainName)) {
+      throw new Error(
+        `vector_store=opensearch: domain name "${domainName}" (from resource_prefix and env) ` +
+          "must be 3-28 lowercase letters, digits or hyphens, starting with a letter.",
+      );
+    }
+    const domain = new opensearch.CfnDomain(this, "VectorStoreDomain", {
+      domainName,
+      engineVersion: opensearch.EngineVersion.OPENSEARCH_3_7.version,
+      clusterConfig: {
+        instanceType:
+          (this.node.tryGetContext("opensearch_instance_type") as string) ??
+          "t3.small.search",
+        instanceCount: 1,
+        dedicatedMasterEnabled: false,
+        zoneAwarenessEnabled: false,
+        multiAzWithStandbyEnabled: false,
+      },
+      ebsOptions: { ebsEnabled: true, volumeType: "gp3", volumeSize: 10 },
+      vpcOptions: {
+        subnetIds: [subnetId],
+        securityGroupIds: [network.aossSecurityGroup.securityGroupId],
+      },
+      encryptionAtRestOptions: { enabled: true },
+      nodeToNodeEncryptionOptions: { enabled: true },
+      domainEndpointOptions: {
+        enforceHttps: true,
+        tlsSecurityPolicy: "Policy-Min-TLS-1-2-2019-07",
+      },
+      accessPolicies: {
+        Version: "2012-10-17",
+        Statement: [
+          {
+            Effect: "Allow",
+            Principal: {
+              AWS: `arn:${this.partition}:iam::${this.account}:root`,
+            },
+            Action: "es:ESHttp*",
+            Resource: `${vectorStoreDomainArn(this)}/*`,
+          },
+        ],
+      },
+    });
+    domain.applyRemovalPolicy(cdk.RemovalPolicy.DESTROY);
+    return domain;
   }
 }

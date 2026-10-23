@@ -58,7 +58,8 @@ export async function resolveConfig(): Promise<ProxyConfig> {
 
   if (!runtimeUrl) {
     const encodedArn = encodeURIComponent(runtimeArn);
-    runtimeUrl = `https://bedrock-agentcore.${region}.amazonaws.com/runtimes/${encodedArn}/invocations?qualifier=DEFAULT`;
+    const dnsSuffix = region.startsWith("cn-") ? "amazonaws.com.cn" : "amazonaws.com";
+    runtimeUrl = `https://bedrock-agentcore.${region}.${dnsSuffix}/runtimes/${encodedArn}/invocations?qualifier=DEFAULT`;
   }
 
   return { clientId, issuer, runtimeArn, runtimeUrl, region };

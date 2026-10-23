@@ -16,3 +16,12 @@ class MetadataStoreError(SCLError):
             message: Human-readable description of the metadata store failure.
         """
         super().__init__(message, code="METADATA_STORE_ERROR")
+
+
+class MetadataStoreNotFoundError(MetadataStoreError):
+    """Raised when the targeted project or asset does not exist.
+
+    Subclasses :class:`MetadataStoreError` so existing ``except
+    MetadataStoreError`` handlers keep catching it; callers that treat
+    absence as success (e.g. idempotent teardown) can catch this narrower type.
+    """

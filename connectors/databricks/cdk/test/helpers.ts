@@ -183,6 +183,27 @@ export function policyStatements(template: Template): PolicyStatement[] {
 }
 
 /** A statement's actions, as a list whether the template rendered one action or several. */
+/**
+ * A statement's `Resource` as a plain ARN string. Grants are written with `stack.partition`, which
+ * synthesises as an `Fn::Join` over `Ref: AWS::Partition`; that ref is rendered as `partition`.
+ */
+export function resourceArn(statement: PolicyStatement, partition = "aws"): string {
+  const resource = statement.Resource;
+  if (typeof resource === "string") {
+    return resource;
+  }
+  const [separator, parts] = (resource as { "Fn::Join": [string, unknown[]] })["Fn::Join"];
+  return parts
+    .map((part) =>
+      typeof part === "string"
+        ? part
+        : (part as { Ref?: string }).Ref === "AWS::Partition"
+          ? partition
+          : JSON.stringify(part),
+    )
+    .join(separator);
+}
+
 export function actionsOf(statement: PolicyStatement): string[] {
   const action = statement.Action;
   if (action === undefined) {

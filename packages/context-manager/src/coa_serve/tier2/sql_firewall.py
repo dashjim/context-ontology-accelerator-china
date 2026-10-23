@@ -83,7 +83,7 @@ _COLUMN_DENYLIST_KEY = "columnDenylist"
 
 
 def _normalized_table_allowlist(allowlist_raw: list[Any] | tuple[Any, ...] | None) -> set[str] | None:
-    """Lower-cased ``tableAllowlist``, or None when the grant sets no table constraint.
+    """Bare, lower-cased ``tableAllowlist``, or None when the grant sets no table constraint.
 
     The one place the allowlist is normalized, shared by :meth:`SQLFirewall.evaluate`
     and :func:`tables_visible_to` so the SQL gate and the trace filter cannot
@@ -97,12 +97,16 @@ def _normalized_table_allowlist(allowlist_raw: list[Any] | tuple[Any, ...] | Non
     Collapsing the two made a deny-all grant fail OPEN — the empty list was
     falsy, so the restriction was dropped and every table was allowed.
 
+    Entries are reduced to their bare table name, the key the firewall gives a
+    referenced table, so ``sales.orders`` permits ``orders`` as the bare entry does.
+    An entry with no table name (``sales.``) permits nothing.
+
     Raises:
         TypeError: If a member cannot be converted (callers fail closed).
     """
     if allowlist_raw is None:
         return None
-    return {str(t).lower() for t in allowlist_raw}
+    return {bare for t in allowlist_raw if (bare := _bare_table_name(t))}
 
 
 def _bare_table_name(name: str) -> str:
@@ -338,7 +342,10 @@ class SQLFirewall:
             for table, cols in denylist_raw.items():
                 if not isinstance(cols, (list, tuple, set, frozenset)):
                     return self._deny(f"Invalid columnDenylist format for table '{table}': expected list")
-                denylist[str(table).lower()] = {str(c).lower() for c in cols}
+                # Key by bare table name, as referenced tables are keyed: a ``db.table``
+                # key otherwise matches nothing and its columns stay readable. Keys that
+                # name the same table merge, so neither drops the other's columns.
+                denylist.setdefault(_bare_table_name(table), set()).update(str(c).lower() for c in cols)
 
         # No table/column restrictions on this grant — the structural allowlist/
         # denylist is "sparse opt-in" (an authorization miss returns a

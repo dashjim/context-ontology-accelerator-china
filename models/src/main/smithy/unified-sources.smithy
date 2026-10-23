@@ -102,7 +102,7 @@ string DatabaseName
 string FilterPattern
 
 /// Secrets Manager ARN for database credentials.
-@pattern("^arn:(aws|aws-us-gov):secretsmanager:[a-z0-9-]+:\\d{12}:secret:.+$")
+@pattern("^arn:(aws|aws-cn|aws-us-gov):secretsmanager:[a-z0-9-]+:\\d{12}:secret:.+$")
 @length(min: 20, max: 2048)
 string SecretArn
 
@@ -769,7 +769,7 @@ list StringList {
 }
 
 /// Bedrock inference profile or foundation model ARN.
-@pattern("^arn:(aws|aws-us-gov):bedrock:[a-z0-9-]*:[0-9]*:(inference-profile|foundation-model)/.+$")
+@pattern("^arn:(aws|aws-cn|aws-us-gov):bedrock:[a-z0-9-]*:[0-9]*:(inference-profile|foundation-model)/.+$")
 @length(min: 20, max: 2048)
 string BedrockModelArn
 

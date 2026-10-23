@@ -783,6 +783,26 @@ class TestDeleteSourceDatazoneAssets:
         # No domain configured → nothing to clean → complete.
         assert complete is True
 
+    def test_dynamodb_backend_cleans_up_without_smus_domain(self, monkeypatch):
+        """On the DynamoDB metadata store an empty SMUS_DOMAIN_ID must not skip
+        the cleanup — that would silently leak the source's assets."""
+        monkeypatch.setenv("METADATA_STORE_BACKEND", "dynamodb")
+        monkeypatch.setenv("METADATA_STORE_TABLE", "metadata-store")
+        asset = MagicMock(asset_id="a1")
+        asset.name = f"DS#{_SOURCE_ID}:public.users"
+        mock_client = MagicMock()
+        mock_client.search_assets.return_value = MagicMock(items=[asset], next_token=None)
+
+        with (
+            patch(f"{_SH}._SMUS_DOMAIN_ID", ""),
+            patch("coa_sources.api.database_routes._resolve_project_id", return_value="proj-1"),
+            patch("coa_sources.api.database_routes._get_smus_client", return_value=mock_client),
+        ):
+            removed, complete = _current_sh()._delete_source_datazone_assets(_NAMESPACE_ID, _SOURCE_ID)
+
+        assert (removed, complete) == (1, True)
+        mock_client.delete_asset.assert_called_once_with(asset_id="a1")
+
     def test_incomplete_when_namespace_has_no_project_id(self):
         with (
             patch(f"{_SH}._SMUS_DOMAIN_ID", "dz-domain-1"),

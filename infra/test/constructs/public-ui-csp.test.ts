@@ -41,6 +41,22 @@ describe("buildContentSecurityPolicy", () => {
     );
   });
 
+  it("uses the amazonaws.com.cn suffix for China-region endpoint origins", () => {
+    const csp = parse(
+      buildContentSecurityPolicy({ ...baseConfig, region: "cn-north-1" }),
+    );
+    expect(csp["connect-src"]).toEqual(
+      expect.arrayContaining([
+        "https://cognito-idp.cn-north-1.amazonaws.com.cn",
+        "https://*.s3.cn-north-1.amazonaws.com.cn",
+        "https://s3.cn-north-1.amazonaws.com.cn",
+      ]),
+    );
+    expect(csp["connect-src"]).not.toContain(
+      "https://s3.cn-north-1.amazonaws.com",
+    );
+  });
+
   it("allows the region's S3 origin in connect-src for the OSI presigned upload", () => {
     // OSI import PUTs directly to S3 from the browser (issue 103). Without the
     // S3 origin here, connect-src blocks the upload with "Failed to fetch".

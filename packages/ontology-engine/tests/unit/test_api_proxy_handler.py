@@ -303,6 +303,38 @@ class TestSystemHealth:
         assert "xyz789" not in result["body"]
         assert "123456789012" not in result["body"]
 
+    @pytest.mark.parametrize(
+        ("status", "expected"),
+        [
+            ({"Created": True, "Deleted": False, "Processing": True}, "ok"),
+            ({"Created": False, "Deleted": False}, "domain_status: creating"),
+            ({"Created": True, "Deleted": True}, "domain_status: deleted"),
+        ],
+    )
+    @patch("boto3.client")
+    @patch("coa_ontology.api_proxy_handler.resolve_region", return_value="cn-north-1")
+    def test_managed_domain_health_describes_the_domain(
+        self, mock_region, mock_boto_client, mod, monkeypatch, status, expected
+    ):
+        """vector_store=opensearch: describe the domain, never call AOSS."""
+        es_client = MagicMock()
+        es_client.describe_domain.return_value = {"DomainStatus": status}
+
+        def client_factory(service, **kwargs):
+            assert service != "opensearchserverless"
+            return es_client if service == "opensearch" else MagicMock()
+
+        mock_boto_client.side_effect = client_factory
+        monkeypatch.setenv("SOURCES_TABLE", "")
+        monkeypatch.setenv("NEPTUNE_ENDPOINT", "")
+        monkeypatch.setenv("OPENSEARCH_ENDPOINT", "https://vpc-coa-dev-vector-store-abc.cn-north-1.es.amazonaws.com.cn")
+        monkeypatch.setenv("OPENSEARCH_DOMAIN_NAME", "coa-dev-vector-store")
+
+        result = mod.handler({"httpMethod": "GET", "resource": "/system-health"}, None)
+
+        assert json.loads(result["body"])["opensearch"] == expected
+        es_client.describe_domain.assert_called_once_with(DomainName="coa-dev-vector-store")
+
     @patch("urllib.request.urlopen")
     @patch("coa_ontology.api_proxy_handler.resolve_region", return_value="us-east-1")
     def test_ontology_induction_readiness_error_opaque(self, mock_region, mock_urlopen, mod, monkeypatch):

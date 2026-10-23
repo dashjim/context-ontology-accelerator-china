@@ -32,12 +32,14 @@ import structlog
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import ClientError
 
+from coa_common.bedrock_access import prepare_bedrock_client
 from coa_common.config import resolve_region
 from coa_common.guardrail_metrics import (
     COMPONENT_KG_BUILD,
     emit_guardrail_decision,
     filter_type_from_assessments,
 )
+from coa_common.llm_provider import is_openai_compatible, skip_unsupported_guardrail
 
 logger = structlog.get_logger(__name__)
 
@@ -168,7 +170,8 @@ class GuardrailScreener:
         if self._client is None:
             self._client = boto3.client(
                 "bedrock-runtime",
-                region_name=self._region,
+                # BEDROCK_REGION may point the client elsewhere; metrics stay in self._region.
+                region_name=prepare_bedrock_client(self._region),
                 config=BotoConfig(
                     read_timeout=10,
                     connect_timeout=5,
@@ -198,6 +201,13 @@ class GuardrailScreener:
         """
         if not texts:
             return []
+
+        if is_openai_compatible():
+            # ApplyGuardrail is Bedrock-only. Pass content through as "no
+            # intervention" (warned once, no decision metrics — an unscreened
+            # text must not be counted as ALLOW).
+            skip_unsupported_guardrail(self._effective_guardrail_id(), component=self._component)
+            return [ScreeningResult(text_index=i, passed=True, action="NONE") for i in range(len(texts))]
 
         content = [{"text": {"text": t}} for t in texts]
         # Spans _call_with_retry, so GuardrailLatency includes retry backoff —

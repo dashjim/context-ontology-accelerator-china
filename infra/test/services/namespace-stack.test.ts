@@ -7,6 +7,7 @@ import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import { Template, Match } from "aws-cdk-lib/assertions";
 import { NamespaceStack } from "../../lib/stacks/services";
+import { resolveCommercialPartition } from "../partition-helpers";
 import { DEFAULT_RESOURCE_PREFIX, DEFAULT_ENV } from "../../lib/constants";
 
 // Mock bundlePython to avoid running pip install and hashing the monorepo root.
@@ -41,13 +42,15 @@ describe("NamespaceStack", () => {
       partitionKey: { name: "PK", type: dynamodb.AttributeType.STRING },
     });
 
-    template = Template.fromStack(
-      new NamespaceStack(app, "TestNamespace", {
-        vpc,
-        lambdaSecurityGroup,
-        rolesTable,
-        resourceRoleMappingsTable: rrmTable,
-      }),
+    template = resolveCommercialPartition(
+      Template.fromStack(
+        new NamespaceStack(app, "TestNamespace", {
+          vpc,
+          lambdaSecurityGroup,
+          rolesTable,
+          resourceRoleMappingsTable: rrmTable,
+        }),
+      ),
     );
   });
 
@@ -95,6 +98,63 @@ describe("NamespaceStack", () => {
         { AttributeName: "PK", KeyType: "HASH" },
         { AttributeName: "SK", KeyType: "RANGE" },
       ]),
+    });
+  });
+
+  test("default (smus) metadata store: DataZone domain, no DynamoDB metadata store", () => {
+    template.resourceCountIs("AWS::DataZone::Domain", 1);
+    expect(
+      Object.keys(
+        template.findResources("AWS::DynamoDB::Table", {
+          Properties: { TableName: Match.stringLikeRegexp("metadata-store$") },
+        }),
+      ),
+    ).toHaveLength(0);
+    const fns = template.findResources("AWS::Lambda::Function");
+    for (const fn of Object.values(fns)) {
+      const vars = fn.Properties.Environment?.Variables ?? {};
+      expect(vars).not.toHaveProperty("METADATA_STORE_BACKEND");
+      expect(vars).not.toHaveProperty("METADATA_STORE_TABLE");
+    }
+  });
+
+  test("metadata_store_backend=dynamodb swaps every DataZone resource for the table", () => {
+    const app = new cdk.App({
+      context: { ...TEST_CONTEXT, metadata_store_backend: "dynamodb" },
+    });
+    const depStack = new cdk.Stack(app, "DdbDep");
+    const vpc = new ec2.Vpc(depStack, "Vpc");
+    const mkTable = (id: string) =>
+      new dynamodb.Table(depStack, id, {
+        partitionKey: { name: "PK", type: dynamodb.AttributeType.STRING },
+      });
+    const tpl = Template.fromStack(
+      new NamespaceStack(app, "DdbNamespace", {
+        vpc,
+        lambdaSecurityGroup: new ec2.SecurityGroup(depStack, "LambdaSG", {
+          vpc,
+        }),
+        rolesTable: mkTable("Roles"),
+        resourceRoleMappingsTable: mkTable("RRM"),
+      }),
+    );
+    const json = JSON.stringify(tpl.toJSON());
+    expect(json).not.toMatch(/AWS::DataZone::|"datazone:/);
+    tpl.hasResourceProperties("AWS::DynamoDB::Table", {
+      TableName: `${DEFAULT_RESOURCE_PREFIX}-${DEFAULT_ENV}-metadata-store`,
+    });
+    // namespace create still reads the project-access role ARN from SSM.
+    tpl.hasResourceProperties("AWS::SSM::Parameter", {
+      Name: `/${DEFAULT_RESOURCE_PREFIX}/smus/dz-project-access-role-arn`,
+    });
+    tpl.hasResourceProperties("AWS::Lambda::Function", {
+      FunctionName: `${DEFAULT_RESOURCE_PREFIX}-${DEFAULT_ENV}-namespace-api`,
+      Environment: {
+        Variables: Match.objectLike({
+          METADATA_STORE_BACKEND: "dynamodb",
+          PROJECT_ACCESS_ROLE_ARN_SSM: Match.anyValue(),
+        }),
+      },
     });
   });
 

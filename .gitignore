@@ -241,3 +241,9 @@ demos/**/*.storage.json
 # The .demo.yaml is the artifact worth committing; a 180 MB MP4 is not.
 demos/**/*.mp4
 demos/**/*.timing.json
+
+# Maven build output from connectors/*.
+connectors/*/target/
+
+# Optional offline spaCy model for preprocessing image builds (see its Dockerfile).
+packages/sources/documents/preprocessing/en_core_web_sm-*.whl

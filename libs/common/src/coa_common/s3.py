@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 _STS_DURATION_SECONDS = 3600
 
-_ROLE_ARN_RE = re.compile(r"^arn:aws:iam::\d{12}:role/.+$")
+_ROLE_ARN_RE = re.compile(r"^arn:(aws|aws-cn|aws-us-gov):iam::\d{12}:role/.+$")
 
 
 def get_s3_client(
@@ -45,7 +45,8 @@ def get_s3_client(
     if role_arn:
         if not _ROLE_ARN_RE.match(role_arn):
             raise ValueError(
-                f"Invalid IAM role ARN format: {role_arn!r}. Expected: arn:aws:iam::<account-id>:role/<role-name>"
+                f"Invalid IAM role ARN format: {role_arn!r}. "
+                "Expected: arn:<partition>:iam::<account-id>:role/<role-name>"
             )
         logger.info("Assuming cross-account role: %s", role_arn)
         try:

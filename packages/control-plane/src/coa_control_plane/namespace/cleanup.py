@@ -27,6 +27,11 @@ import structlog
 from coa_common import async_boto_config
 from coa_common.constants import graphrag_index_names
 from coa_common.dao import DynamoDBDAO, QueryParams
+from coa_common.metadata_store import (
+    MetadataStoreNotFoundError,
+    build_metadata_store_client,
+    missing_metadata_store_config,
+)
 from coa_common.opensearch import AossVectorClient
 
 logger = structlog.get_logger(__name__)
@@ -53,10 +58,13 @@ def delete_athena_workgroup(workgroup_name: str | None) -> None:
 
 
 def delete_smu_project(namespace_id: str, item: dict[str, Any]) -> None:
-    """Delete DataZone project. Raises on failure (not-found is OK).
+    """Delete the namespace's metadata store project. Raises on failure (not-found is OK).
 
-    Assumes PROJECT_ACCESS_ROLE_ARN (DzProjectAccessRole) rather than
-    calling DeleteProject with this Lambda's own execution role. DataZone
+    Goes through the configured metadata store backend (SMUS/DataZone or
+    DynamoDB, see ``build_metadata_store_client``).
+
+    For SMUS this assumes PROJECT_ACCESS_ROLE_ARN (DzProjectAccessRole) rather
+    than calling DeleteProject with this Lambda's own execution role. DataZone
     authorizes project deletion against project *ownership*, not IAM policy
     alone. DzProjectAccessRole is registered as PROJECT_OWNER at
     project-creation time (see service.py's _add_service_role_memberships,
@@ -65,51 +73,33 @@ def delete_smu_project(namespace_id: str, item: dict[str, Any]) -> None:
     contributor-level membership is not sufficient for DeleteProject).
     Calling with the execution role's own (IAM-permitted but non-owner)
     identity returns AccessDeniedException regardless of the execution
-    role's IAM policy.
+    role's IAM policy. Without a configured role ARN (e.g. local/unit-test
+    environments) the caller's own credentials are used.
     """
     project_id = item.get("dataZoneProjectId")
-    domain_id = os.environ.get("DATAZONE_DOMAIN_ID")
-    if not project_id or not domain_id:
+    domain_id = os.environ.get("DATAZONE_DOMAIN_ID", "")
+    # Backend-aware: the DynamoDB metadata store needs no DataZone domain, so an
+    # empty DATAZONE_DOMAIN_ID there must not skip the delete.
+    if not project_id or missing_metadata_store_config(domain_id=domain_id, domain_id_var="DATAZONE_DOMAIN_ID"):
         logger.info("smu_project_skip", namespace_id=namespace_id, project_id=project_id, domain_id=domain_id)
         return
 
-    region = os.environ.get("AWS_REGION", "us-east-1")
-    assume_role_arn = os.environ.get("PROJECT_ACCESS_ROLE_ARN")
-    dz = _datazone_client(region=region, assume_role_arn=assume_role_arn)
-    try:
-        # skipDeletionCheck=True force-deletes the project even though it still
-        # owns assets. Every induced namespace registers DataZone assets, so
-        # without this the call raises ValidationException ("a dependency exists
-        # ... asset ...") and namespace deletion fails — the asset lifecycle is
-        # owned by the namespace teardown, not a manual pre-step.
-        dz.delete_project(domainIdentifier=domain_id, identifier=project_id, skipDeletionCheck=True)
-        logger.info("smu_project_deleted", namespace_id=namespace_id, project_id=project_id)
-    except dz.exceptions.ResourceNotFoundException:
-        logger.info("smu_project_not_found", namespace_id=namespace_id, project_id=project_id)
-
-
-def _datazone_client(*, region: str, assume_role_arn: str | None):
-    """Return a DataZone client, optionally assuming PROJECT_ACCESS_ROLE_ARN first.
-
-    Falls back to the caller's own execution-role credentials when no role
-    ARN is configured (e.g. local/unit-test environments) so this stays a
-    drop-in replacement for the previous direct ``boto3.client("datazone")``.
-    """
-    if not assume_role_arn:
-        return boto3.client("datazone", region_name=region, config=async_boto_config())
-
-    sts = boto3.client("sts", region_name=region, config=async_boto_config())
-    creds = sts.assume_role(
-        RoleArn=assume_role_arn,
-        RoleSessionName="ns-deletion-platform-dz-access",
-    )["Credentials"]
-    session = boto3.Session(
-        aws_access_key_id=creds["AccessKeyId"],
-        aws_secret_access_key=creds["SecretAccessKey"],
-        aws_session_token=creds["SessionToken"],
-        region_name=region,
+    metadata_store = build_metadata_store_client(
+        domain_id=domain_id,
+        region_name=os.environ.get("AWS_REGION", "us-east-1"),
+        assume_role_arn=os.environ.get("PROJECT_ACCESS_ROLE_ARN") or None,
+        session_name="ns-deletion-platform-dz-access",
     )
-    return session.client("datazone")
+    try:
+        # force=True deletes the project even though it still owns assets.
+        # Every induced namespace registers assets, so without it the delete
+        # is refused ("a dependency exists ... asset ...") and namespace
+        # deletion fails — the asset lifecycle is owned by the namespace
+        # teardown, not a manual pre-step.
+        metadata_store.delete_project(project_id=project_id, force=True)
+        logger.info("smu_project_deleted", namespace_id=namespace_id, project_id=project_id)
+    except MetadataStoreNotFoundError:
+        logger.info("smu_project_not_found", namespace_id=namespace_id, project_id=project_id)
 
 
 # ── Role mappings / roles (DDB, batch, non-atomic) ─────────────────────────

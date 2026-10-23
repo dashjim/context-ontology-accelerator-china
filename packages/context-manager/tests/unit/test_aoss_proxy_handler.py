@@ -85,3 +85,30 @@ class TestAossProxyHandler:
         )
         call_body = _mock_client.search.call_args[1]["body"]
         assert call_body["size"] <= 50
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("endpoint", "service"),
+    [
+        ("https://test.us-west-2.aoss.amazonaws.com", "aoss"),
+        ("https://vpc-coa-dev-vector-store-abc.cn-north-1.es.amazonaws.com.cn", "es"),
+    ],
+)
+def test_signs_for_the_endpoint_service(monkeypatch, endpoint, service):
+    """The proxy signs for ``aoss`` on a collection and ``es`` on a managed domain."""
+    import importlib
+
+    import index
+
+    monkeypatch.setenv("OPENSEARCH_ENDPOINT", endpoint)
+    importlib.reload(index)  # _ENDPOINT is read at import
+    with (
+        patch.object(index, "RequestsAWSV4SignerAuth") as mock_auth,
+        patch.object(index, "OpenSearch"),
+        patch.object(index.boto3, "Session"),
+    ):
+        index._get_client()
+    assert mock_auth.call_args.args[2] == service
+    monkeypatch.setenv("OPENSEARCH_ENDPOINT", "https://test.us-west-2.aoss.amazonaws.com")
+    importlib.reload(index)

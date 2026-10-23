@@ -1,7 +1,8 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-export const S3_ARN_RE = /^arn:aws:s3:::[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/;
+export const S3_ARN_RE =
+  /^arn:(aws|aws-cn|aws-us-gov):s3:::[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/;
 export const S3_PREFIX_RE = /^(?!\/)(?!.*\.\.)[A-Za-z0-9_./-]+$/;
 
 export function validateS3Prefix(value: string): string {

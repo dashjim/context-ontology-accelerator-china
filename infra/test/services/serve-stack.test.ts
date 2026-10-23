@@ -9,6 +9,7 @@ import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import { Template, Match } from "aws-cdk-lib/assertions";
 import { ServeStack } from "../../lib/stacks/services/serve-stack";
+import { resolveCommercialPartition } from "../partition-helpers";
 import {
   DEFAULT_BEDROCK_LLM_MODEL_ID,
   DEFAULT_RESOURCE_PREFIX,
@@ -61,7 +62,7 @@ function createStack(contextOverrides: Record<string, unknown> = {}): Template {
     resourceRoleMappingsTable: mkTable("RRM"),
   });
 
-  return Template.fromStack(stack);
+  return resolveCommercialPartition(Template.fromStack(stack));
 }
 
 describe("ServeStack - Security Group egress", () => {
@@ -389,6 +390,12 @@ describe("ServeStack - Redshift execution engine IAM", () => {
     });
   });
 
+  it("sets no PlatformVersion outside China", () => {
+    template.hasResourceProperties("AWS::BedrockAgentCore::Runtime", {
+      PlatformVersion: Match.absent(),
+    });
+  });
+
   it("resolves GROUP_CLAIM_NAME from SSM (not a hardcoded Cognito default)", () => {
     // Regression: this used to be a hardcoded DEFAULT_GROUP_CLAIM
     // ("cognito:groups") passed from app.ts regardless of idpType, which
@@ -418,7 +425,12 @@ describe("ServeStack - custom Athena federation connector IAM", () => {
   beforeAll(() => {
     template = createStack();
     const policies = Object.values(template.findResources("AWS::IAM::Policy"));
-    allStatements = policies.flatMap(
+    // CDK moves statements past its inline-size estimate into an
+    // `OverflowPolicy` managed policy on the same role.
+    const overflowPolicies = Object.values(
+      template.findResources("AWS::IAM::ManagedPolicy"),
+    );
+    allStatements = [...policies, ...overflowPolicies].flatMap(
       (p: any) => p.Properties?.PolicyDocument?.Statement ?? [],
     );
     // Scope to the runtime's own role: collecting across every policy in the
@@ -430,8 +442,15 @@ describe("ServeStack - custom Athena federation connector IAM", () => {
       ),
     );
     expect(runtimeRolePolicy).toBeDefined();
-    runtimeStatements = (runtimeRolePolicy as any).Properties.PolicyDocument
-      .Statement;
+    const runtimeRoles = JSON.stringify(
+      (runtimeRolePolicy as any).Properties.Roles,
+    );
+    runtimeStatements = [
+      runtimeRolePolicy,
+      ...overflowPolicies.filter(
+        (p: any) => JSON.stringify(p.Properties?.Roles) === runtimeRoles,
+      ),
+    ].flatMap((p: any) => p.Properties.PolicyDocument.Statement);
   });
 
   const bySid = (sid: string) =>
@@ -727,6 +746,111 @@ describe("ServeStack - guardrail off switch", () => {
   });
 });
 
+describe("ServeStack - AgentCore Memory switch", () => {
+  // AgentCore Memory is not offered in AWS China, so the switch must remove
+  // every trace of it, not just the resource.
+  const MEMORY_ACTIONS = [
+    "bedrock-agentcore:CreateEvent",
+    "bedrock-agentcore:GetEvent",
+    "bedrock-agentcore:ListEvents",
+  ];
+
+  function runtimeActions(template: Template): string[] {
+    const policies = template.findResources("AWS::IAM::Policy");
+    return Object.values(policies).flatMap((p) =>
+      (
+        p.Properties.PolicyDocument.Statement as Array<{
+          Action: string | string[];
+        }>
+      ).flatMap((s) => (Array.isArray(s.Action) ? s.Action : [s.Action])),
+    );
+  }
+
+  it("provisions Memory, MEMORY_ID and grants by default", () => {
+    const template = createStack();
+    template.resourceCountIs("AWS::BedrockAgentCore::Memory", 1);
+    template.hasResourceProperties("AWS::BedrockAgentCore::Runtime", {
+      EnvironmentVariables: Match.objectLike({ MEMORY_ID: Match.anyValue() }),
+    });
+    expect(runtimeActions(template)).toEqual(
+      expect.arrayContaining(MEMORY_ACTIONS),
+    );
+  });
+
+  it.each(["false", false, "0", " OFF "])(
+    "omits Memory, MEMORY_ID and grants when agentcore_memory_enabled=%p",
+    (value) => {
+      const template = createStack({ agentcore_memory_enabled: value });
+      template.resourceCountIs("AWS::BedrockAgentCore::Memory", 0);
+      for (const runtime of Object.values(
+        template.findResources("AWS::BedrockAgentCore::Runtime"),
+      )) {
+        expect(runtime.Properties.EnvironmentVariables).not.toHaveProperty(
+          "MEMORY_ID",
+        );
+        // Sessions still live in DDB, so the metadata table stays wired.
+        expect(runtime.Properties.EnvironmentVariables).toHaveProperty(
+          "SESSION_METADATA_TABLE",
+        );
+      }
+      const actions = runtimeActions(template);
+      for (const action of MEMORY_ACTIONS) {
+        expect(actions).not.toContain(action);
+      }
+    },
+  );
+});
+
+describe("ServeStack - LLM provider switch", () => {
+  const SECRET_ARN =
+    "arn:aws:secretsmanager:us-east-1:123456789012:secret:coa/llm-key-AbCdEf";
+
+  function runtimeEnv(template: Template): Record<string, unknown> {
+    const runtimes = Object.values(
+      template.findResources("AWS::BedrockAgentCore::Runtime"),
+    );
+    expect(runtimes).toHaveLength(1);
+    return runtimes[0].Properties.EnvironmentVariables;
+  }
+
+  it("sets no LLM_PROVIDER / OPENAI_COMPAT_* and no key grant by default", () => {
+    // openai_compat_* context alone does nothing while llm_provider is bedrock.
+    const template = createStack({
+      openai_compat_base_url: "https://llm.example.com/v1",
+      openai_compat_api_key_secret_arn: SECRET_ARN,
+    });
+    const keys = Object.keys(runtimeEnv(template));
+    expect(
+      keys.filter((k) => k === "LLM_PROVIDER" || k.startsWith("OPENAI_COMPAT")),
+    ).toEqual([]);
+    expect(JSON.stringify(template.toJSON())).not.toContain(SECRET_ARN);
+  });
+
+  it("wires the OpenAI-compatible endpoint and scopes the key grant", () => {
+    const template = createStack({
+      llm_provider: "openai_compatible",
+      openai_compat_base_url: "https://llm.example.com/v1",
+      openai_compat_api_key_secret_arn: SECRET_ARN,
+    });
+    expect(runtimeEnv(template)).toMatchObject({
+      LLM_PROVIDER: "openai_compatible",
+      OPENAI_COMPAT_BASE_URL: "https://llm.example.com/v1",
+      OPENAI_COMPAT_API_KEY_SECRET_ARN: SECRET_ARN,
+    });
+    template.hasResourceProperties("AWS::IAM::Policy", {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          {
+            Action: "secretsmanager:GetSecretValue",
+            Effect: "Allow",
+            Resource: SECRET_ARN,
+          },
+        ]),
+      },
+    });
+  });
+});
+
 describe("ServeStack - deep-reasoning budget variables", () => {
   // These budgets were renamed from AGENTIC_* when the execution mode was
   // rebranded to "deep reasoning". The stack's non-default values (110s budget vs
@@ -809,9 +933,10 @@ describe("ServeStack - credential-secret namespace binding", () => {
   // ABSENT here keeps the two mechanisms disjoint.
   it("excludes namespace-bound secrets from the runtime's broad identity grant", () => {
     const template = createStack();
-    const statements = Object.values(
-      template.findResources("AWS::IAM::Policy"),
-    ).flatMap((p: any) => p.Properties.PolicyDocument.Statement);
+    const statements = [
+      ...Object.values(template.findResources("AWS::IAM::Policy")),
+      ...Object.values(template.findResources("AWS::IAM::ManagedPolicy")),
+    ].flatMap((p: any) => p.Properties.PolicyDocument.Statement);
 
     const reads = statements.filter((s: any) => {
       const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
@@ -829,9 +954,10 @@ describe("ServeStack - credential-secret namespace binding", () => {
   // while appearing to close it.
   it("derives the tag key from the deployment prefix", () => {
     const template = createStack({ resource_prefix: "scl" });
-    const statements = Object.values(
-      template.findResources("AWS::IAM::Policy"),
-    ).flatMap((p: any) => p.Properties.PolicyDocument.Statement);
+    const statements = [
+      ...Object.values(template.findResources("AWS::IAM::Policy")),
+      ...Object.values(template.findResources("AWS::IAM::ManagedPolicy")),
+    ].flatMap((p: any) => p.Properties.PolicyDocument.Statement);
     const read = statements.find((s: any) => s.Sid === "ReadPlatformSecrets");
     expect(read.Condition).toEqual({
       Null: { "secretsmanager:ResourceTag/scl:namespace": "true" },
@@ -883,7 +1009,6 @@ describe("ServeStack - GRAPH_URI_TEMPLATE reader/writer alignment", () => {
   });
 });
 
-
 describe("ServeStack - SERVE_VKG_TRANSLATION_TIMEOUT_S wiring", () => {
   const envOf = (template: Template): Record<string, unknown> => {
     const runtimes = template.findResources("AWS::BedrockAgentCore::Runtime");
@@ -900,9 +1025,9 @@ describe("ServeStack - SERVE_VKG_TRANSLATION_TIMEOUT_S wiring", () => {
     // The load-bearing case: a numeric 0 in cdk.json context is falsy in JS, so a
     // truthiness check would drop it. serve-stack uses `!== undefined`, so it must
     // survive as "0" and be clamped downstream rather than silently ignored.
-    expect(envOf(createStack({ serve_vkg_translation_timeout_s: 0 }))).toMatchObject(
-      { SERVE_VKG_TRANSLATION_TIMEOUT_S: "0" },
-    );
+    expect(
+      envOf(createStack({ serve_vkg_translation_timeout_s: 0 })),
+    ).toMatchObject({ SERVE_VKG_TRANSLATION_TIMEOUT_S: "0" });
   });
 
   it("passes a set value through verbatim", () => {

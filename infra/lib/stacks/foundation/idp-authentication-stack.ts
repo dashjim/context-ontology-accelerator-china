@@ -329,7 +329,7 @@ export class IdpAuthenticationStack extends SCLStack {
     });
 
     this.mcpClientId = this.mcpClient.userPoolClientId;
-    this.issuerUrl = `https://cognito-idp.${this.region}.amazonaws.com/${this.userPool.userPoolId}`;
+    this.issuerUrl = `https://cognito-idp.${this.region}.${this.urlSuffix}/${this.userPool.userPoolId}`;
 
     // ── SSM Parameters ─────────────────────────────────────────────
     new ssm.StringParameter(this, "SsmUserPoolId", {

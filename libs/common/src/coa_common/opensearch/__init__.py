@@ -55,7 +55,11 @@ AOSS quirks this client encapsulates
 
 Auth
 ----
-SigV4 for the ``aoss`` service (NOT ``es``), using ``AWSV4SignerAuth`` with the
+SigV4 for the ``aoss`` service, or ``es`` when the endpoint is a managed
+OpenSearch Service domain (``*.es.amazonaws.com[.cn]``, the
+``vector_store=opensearch`` deployment in AWS China) — see
+:func:`coa_common.config.opensearch_signing_service`. Every AOSS-safe request
+shape above also works on a domain. Signed with ``AWSV4SignerAuth`` and the
 **live** boto3 credentials object — it re-signs each request with the current
 auto-refreshed credentials, so a long-lived cached client survives Fargate
 task-role token rotation (a frozen-snapshot signer 403s after ~6–12h).
@@ -74,6 +78,7 @@ from coa_common.opensearch.client import (
     IncompatibleEngineError,
     build_index_mapping,
 )
+from coa_common.opensearch.graphrag_signing import patch_graphrag_signing_service
 from coa_common.opensearch.retry import (
     OSS_MAX_BACKOFF_S,
     OSS_MAX_RETRIES,
@@ -89,6 +94,7 @@ __all__ = [
     "AossVectorClient",
     "IncompatibleEngineError",
     "build_index_mapping",
+    "patch_graphrag_signing_service",
     "OSS_RETRY_STATUS",
     "OSS_MAX_RETRIES",
     "OSS_MAX_BACKOFF_S",

@@ -204,7 +204,7 @@ export function grantManagedConfigAccess(
       // The `sources/` subtree only: a prefix covering the sibling `deployment/` subtree would let a
       // compromised connector repoint the parameter every future catalog is created from.
       resources: [
-        `arn:aws:ssm:${stack.region}:${stack.account}:parameter${managed.configSsmPrefix}/*`,
+        `arn:${stack.partition}:ssm:${stack.region}:${stack.account}:parameter${managed.configSsmPrefix}/*`,
       ],
     }),
   );
@@ -221,7 +221,7 @@ export function grantManagedConfigAccess(
       // is the reserved role-name prefix plus the target role's own trust policy, and it shares one
       // constant with the aspect the stack attaches.
       resources: [
-        `arn:aws:iam::*:role/${managed.resourcePrefix}${RESERVED_DATASOURCE_ROLE_SEGMENT}*`,
+        `arn:${stack.partition}:iam::*:role/${managed.resourcePrefix}${RESERVED_DATASOURCE_ROLE_SEGMENT}*`,
       ],
       // The ExternalId — derived from the namespace, never accepted from a request — binds the
       // assume to the namespace that asked for it, so a regression that stopped sending one fails

@@ -69,7 +69,7 @@ export class ReservedRoleNamePrefix implements cdk.IAspect {
           : `"${arnSuffix}" falls under`
       } the reserved datasource-access prefix "${this.reservedPrefix}" ` +
         `(${node.node.path}). Every sts:AssumeRole grant in this app is scoped to ` +
-        `arn:aws:iam::*:role/${this.reservedPrefix}* with no account restriction, so ` +
+        `arn:<partition>:iam::*:role/${this.reservedPrefix}* with no account restriction, so ` +
         `a COA-internal role here would be assumable by the discovery role, the ` +
         `enrichment task, the sources API and the Databricks connector. Rename it, or ` +
         `move it off that IAM path.`,

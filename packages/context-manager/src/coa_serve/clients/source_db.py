@@ -69,7 +69,7 @@ _DB_THREAD_POOL_SIZE = 5
 _EXECUTOR = ThreadPoolExecutor(max_workers=_DB_THREAD_POOL_SIZE, thread_name_prefix="source-db")
 
 # Validates Secrets Manager ARN format before fetching credentials
-_SECRET_ARN_PATTERN = re.compile(r"^arn:aws:secretsmanager:[a-z0-9-]+:\d{12}:secret:.+")
+_SECRET_ARN_PATTERN = re.compile(r"^arn:(aws|aws-cn|aws-us-gov):secretsmanager:[a-z0-9-]+:\d{12}:secret:.+")
 
 # Allowed characters for namespace identifiers (alphanumeric, hyphens, underscores)
 _NAMESPACE_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")

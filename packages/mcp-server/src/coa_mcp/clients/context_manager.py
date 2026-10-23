@@ -25,6 +25,7 @@ from urllib.parse import quote
 
 import httpx
 import structlog
+from coa_common.config import aws_dns_suffix
 from httpx_sse import aconnect_sse
 
 logger = structlog.get_logger(__name__)
@@ -48,8 +49,9 @@ class ContextManagerClient:
         self._region = region
         self._runtime_arn = runtime_arn
         encoded_arn = quote(runtime_arn, safe="")
+        dns_suffix = aws_dns_suffix(region)
         self._url = (
-            f"https://bedrock-agentcore.{region}.amazonaws.com/runtimes/{encoded_arn}/invocations?qualifier=DEFAULT"
+            f"https://bedrock-agentcore.{region}.{dns_suffix}/runtimes/{encoded_arn}/invocations?qualifier=DEFAULT"
         )
         # Fast connect timeout, long read budget (the CM does full tiered
         # resolution). No retry here: the CM retries its own dependencies, so

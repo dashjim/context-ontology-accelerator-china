@@ -6,6 +6,10 @@
 Provides create/resume, history loading, and turn storage for
 multi-turn conversations. Sessions use ULID IDs and are
 scoped per namespace through DynamoDB metadata for discovery.
+
+Without a Memory id (regions with no AgentCore Memory, e.g. AWS China) the
+manager runs with conversation history disabled: history reads are empty and
+turn writes are skipped, while sessions themselves keep working.
 """
 
 from __future__ import annotations
@@ -102,13 +106,18 @@ def _parse_assistant_content(raw_text: str) -> tuple[str, dict | None]:
 class SessionManager:
     """Manages conversation sessions backed by AgentCore Memory."""
 
-    def __init__(self, memory_id: str, region: str | None = None):
+    def __init__(self, memory_id: str | None, region: str | None = None):
         """Wire up the AgentCore Memory session manager.
 
         Args:
             memory_id: AgentCore Memory resource id backing conversation storage.
+                Empty/None disables conversation history (no Memory client).
             region: AWS region for the Memory client; uses the default when None.
         """
+        self._manager: MemorySessionManager | None = None
+        if not memory_id:
+            logger.info("conversation_history_disabled", reason="memory_id_not_configured")
+            return
         self._manager = MemorySessionManager(
             memory_id=memory_id,
             region_name=region,
@@ -252,6 +261,8 @@ class SessionManager:
         namespace_id: str = "",
     ) -> list[dict]:
         """Fetch turns from AgentCore Memory and parse messages."""
+        if self._manager is None:
+            return []
         session = self._manager.create_memory_session(
             actor_id=self._memory_actor(user_id, namespace_id),
             session_id=session_id,
@@ -292,7 +303,10 @@ class SessionManager:
 
         Stores plain text first (guaranteed to work), then optionally
         attempts to store with JSON envelope for rich history.
+        No-op when conversation history is disabled.
         """
+        if self._manager is None:
+            return
         # Build the text to store. Try envelope, fall back to plain text.
         assistant_text = answer_summary
         if result_metadata:

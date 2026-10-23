@@ -144,6 +144,51 @@ class TestDeleteSmuProject:
             domainIdentifier="dz-domain-123", identifier="proj-abc", skipDeletionCheck=True
         )
 
+    def test_not_found_is_ok(self, monkeypatch):
+        from botocore.exceptions import ClientError
+        from coa_control_plane.namespace import cleanup
+
+        mock_dz = MagicMock()
+        mock_dz.delete_project.side_effect = ClientError(
+            {"Error": {"Code": "ResourceNotFoundException", "Message": "gone"}}, "DeleteProject"
+        )
+        monkeypatch.setattr(cleanup.boto3, "client", lambda *a, **k: mock_dz)
+
+        cleanup.delete_smu_project("ns-123", {"dataZoneProjectId": "proj-abc"})
+
+    def test_other_failures_raise(self, monkeypatch):
+        from botocore.exceptions import ClientError
+        from coa_common.metadata_store import MetadataStoreError
+        from coa_control_plane.namespace import cleanup
+
+        mock_dz = MagicMock()
+        mock_dz.delete_project.side_effect = ClientError(
+            {"Error": {"Code": "AccessDeniedException", "Message": "no"}}, "DeleteProject"
+        )
+        monkeypatch.setattr(cleanup.boto3, "client", lambda *a, **k: mock_dz)
+
+        with pytest.raises(MetadataStoreError):
+            cleanup.delete_smu_project("ns-123", {"dataZoneProjectId": "proj-abc"})
+
+    def test_uses_configured_metadata_store_backend(self, monkeypatch):
+        """No direct DataZone client: the delete goes through the metadata store abstraction."""
+        from coa_control_plane.namespace import cleanup
+
+        monkeypatch.setenv("PROJECT_ACCESS_ROLE_ARN", "arn:aws:iam::123456789012:role/dz-project-access")
+        store = MagicMock()
+        build = MagicMock(return_value=store)
+        monkeypatch.setattr(cleanup, "build_metadata_store_client", build)
+
+        cleanup.delete_smu_project("ns-123", {"dataZoneProjectId": "proj-abc"})
+
+        build.assert_called_once_with(
+            domain_id="dz-domain-123",
+            region_name="us-east-1",
+            assume_role_arn="arn:aws:iam::123456789012:role/dz-project-access",
+            session_name="ns-deletion-platform-dz-access",
+        )
+        store.delete_project.assert_called_once_with(project_id="proj-abc", force=True)
+
 
 @pytest.mark.unit
 class TestDeleteAthenaWorkgroup:

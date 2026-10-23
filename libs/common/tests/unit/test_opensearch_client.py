@@ -627,6 +627,35 @@ class TestSignedClientAuth:
             assert args[2] == "aoss"
             mock_os.assert_called_once()
 
+    def test_managed_domain_signs_for_es(self):
+        """vector_store=opensearch: a ``*.es.amazonaws.com.cn`` endpoint signs for ``es``."""
+        session = MagicMock()
+        session.get_credentials.return_value = object()
+        with (
+            patch.object(client_mod.boto3, "Session", return_value=session),
+            patch.object(client_mod, "AWSV4SignerAuth") as mock_auth,
+            patch.object(client_mod, "OpenSearch") as mock_os,
+        ):
+            mock_os.return_value.indices.exists.return_value = False
+            mock_os.return_value.indices.get_mapping.return_value = _faiss_mapping("idx")
+            c = AossVectorClient(
+                endpoint="https://vpc-coa-dev-vector-store-abc.cn-north-1.es.amazonaws.com.cn",
+                region="cn-north-1",
+                dimensions=4,
+            )
+            c.ensure_index("idx")
+            assert mock_auth.call_args.args[1:] == ("cn-north-1", "es")
+            assert mock_os.call_args.kwargs["hosts"] == [
+                {"host": "vpc-coa-dev-vector-store-abc.cn-north-1.es.amazonaws.com.cn", "port": 443}
+            ]
+            # A managed domain needs ``index.knn: true`` for knn_vector fields and
+            # accepts the explicit Faiss/HNSW method: the canonical mapping (shared
+            # with AOSS) carries both, so creation is the same single request.
+            mock_os.return_value.indices.create.assert_called_once()
+            body = mock_os.return_value.indices.create.call_args.kwargs["body"]
+            assert body["settings"] == {"index": {"knn": True}}
+            assert body["mappings"]["properties"]["embedding"]["method"]["engine"] == "faiss"
+
     def test_missing_credentials_raises(self):
         from coa_common.opensearch import client as client_mod
 
@@ -783,3 +812,30 @@ class TestMissingIndexReadsEmpty:
         c, fake = _client_raising(NotFoundError(404, "index_not_found_exception", {}))
         c.filter_search("gone-idx", [{"term": {"ontology_id": "o"}}])
         fake.indices.create.assert_not_called()
+
+
+# ── graphrag-toolkit signing patch ──────────────────────────────────────────
+
+
+class TestGraphragSigningPatch:
+    """graphrag-toolkit hard-codes ``aoss``; the patch re-signs for a managed domain."""
+
+    def test_noop_for_aoss(self):
+        from coa_common.opensearch import patch_graphrag_signing_service
+
+        assert patch_graphrag_signing_service("https://abc.us-east-1.aoss.amazonaws.com") is False
+
+    def test_managed_domain_signs_for_es(self, monkeypatch):
+        ovi = pytest.importorskip("graphrag_toolkit.lexical_graph.storage.vector.opensearch_vector_indexes")
+        from botocore.credentials import Credentials
+        from coa_common.opensearch import patch_graphrag_signing_service
+
+        # Restore the toolkit's signer classes after the test.
+        monkeypatch.setattr(ovi, "Urllib3AWSV4SignerAuth", ovi.Urllib3AWSV4SignerAuth)
+        monkeypatch.setattr(ovi, "AWSV4SignerAsyncAuth", ovi.AWSV4SignerAsyncAuth)
+
+        assert patch_graphrag_signing_service("https://vpc-d-abc.cn-north-1.es.amazonaws.com.cn") is True
+        creds = Credentials("AKID", "SECRET")
+        # create_os_client / create_os_async_client pass a literal "aoss".
+        assert ovi.Urllib3AWSV4SignerAuth(creds, "cn-north-1", "aoss").service == "es"
+        assert ovi.AWSV4SignerAsyncAuth(creds, "cn-north-1", "aoss").signer.service == "es"

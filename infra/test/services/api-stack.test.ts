@@ -1,6 +1,8 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+import * as fs from "fs";
+import * as path from "path";
 import * as cdk from "aws-cdk-lib";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
@@ -576,5 +578,59 @@ describe("ApiStack 501-stub guard", () => {
     // Most tests in this file construct the stack to assert on the authorizer or
     // the WAF and pass no handlers. For them every path stubs, which is correct.
     expect(synth()).not.toThrow();
+  });
+});
+
+describe("ApiStack authorizer JWKS_URI (oidcSettings.jwksUri)", () => {
+  const mkApi = (jwksUri?: string) => {
+    const app = new cdk.App({ context: TEST_CONTEXT });
+    const depStack = new cdk.Stack(app, "DepStack", {
+      env: { account: "123456789012", region: "us-east-1" },
+    });
+    const vpc = new ec2.Vpc(depStack, "Vpc");
+    const mkTable = (id: string) => mkTestTable(depStack, id);
+    return Template.fromStack(
+      new ApiStack(app, "TestApiJwks", {
+        env: { account: "123456789012", region: "us-east-1" },
+        allowedOrigin: "*",
+        vpc,
+        rolesTable: mkTable("Roles"),
+        resourceRoleMappingsTable: mkTable("RRM"),
+        cacheInvalidationTable: mkTable("Cache"),
+        ...(jwksUri ? { jwksUri } : {}),
+      }),
+    );
+  };
+  const authorizerVariables = (template: Template): Record<string, unknown> => {
+    const fns = Object.values(
+      template.findResources("AWS::Lambda::Function", {
+        Properties: { FunctionName: Match.stringLikeRegexp(".*authorizer$") },
+      }),
+    );
+    expect(fns).toHaveLength(1);
+    return fns[0]!.Properties.Environment.Variables;
+  };
+
+  it("sets JWKS_URI on the authorizer when jwksUri is given", () => {
+    const uri = "https://idp.example.com/jwks.json";
+    expect(authorizerVariables(mkApi(uri)).JWKS_URI).toBe(uri);
+  });
+
+  it("sets no JWKS_URI without jwksUri (the authorizer uses OIDC discovery)", () => {
+    expect(authorizerVariables(mkApi())).not.toHaveProperty("JWKS_URI");
+  });
+
+  it("is passed oidcSettings.jwksUri by bin/app.ts", () => {
+    // A source assertion, as in app-connector-tag.test.ts: bin/app.ts reads SSM at
+    // module scope (`void deploy()`), so it cannot be imported in a unit test. It
+    // never passed this prop, so an external IdP's jwksUri never reached the
+    // authorizer even though deploying.md documents oidcSettings.jwksUri -> JWKS_URI.
+    const appSource = fs.readFileSync(
+      path.join(__dirname, "..", "..", "bin", "app.ts"),
+      "utf8",
+    );
+    const call = appSource.match(/new ApiStack\([\s\S]*?\n {2}\}\);/);
+    expect(call).not.toBeNull();
+    expect(call![0]).toMatch(/jwksUri:\s*authProps\.oidcSettings\.jwksUri\b/);
   });
 });

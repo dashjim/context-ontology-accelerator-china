@@ -19,13 +19,14 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
+from coa_common.config import resolve_region
 from coa_common.constants import validate_query_text
 from coa_common.logging import setup_logging
 from pydantic import ValidationError
 
 from .clients.athena import AthenaQueryExecutor
-from .clients.bedrock import BedrockLLMClient
 from .clients.composite_executor import CompositeQueryExecutor
+from .clients.factory import build_llm_client
 from .clients.neptune import NeptuneGraphClient
 from .clients.opensearch import OpenSearchVectorClient
 from .config import ServiceConfig, load_config
@@ -151,24 +152,29 @@ async def _ensure_initialized():
         await asyncio.to_thread(guardrail_provider.prime)
         _guardrail_provider = guardrail_provider
 
-        # Session manager (optional — requires MEMORY_ID)
-        if config.memory_id:
-            _session_manager = SessionManager(
-                memory_id=config.memory_id,
-                region=config.bedrock_region,
-            )
+        # Session manager. Without MEMORY_ID (no AgentCore Memory, e.g. AWS
+        # China) it runs with conversation history disabled, so sessions,
+        # streaming and the session actions still work, with empty history.
+        # Non-Bedrock clients use the deployment region: BEDROCK_REGION may point
+        # Bedrock at another region (AWS China calls commercial-region Bedrock).
+        aws_region = resolve_region()
+        _session_manager = SessionManager(
+            memory_id=config.memory_id,
+            region=aws_region,
+        )
 
         # Session metadata store (optional — requires SESSION_METADATA_TABLE)
         if config.session_metadata_table:
             _session_metadata = SessionMetadataStore(
                 table_name=config.session_metadata_table,
-                region=config.bedrock_region,
+                region=aws_region,
             )
 
         # Build client layer
         neptune_client = NeptuneGraphClient(endpoint=config.neptune_endpoint)
         opensearch_client = OpenSearchVectorClient(endpoint=config.opensearch_endpoint)
-        bedrock_client = BedrockLLMClient(model_id=config.bedrock_model_id, region=config.bedrock_region)
+        # Bedrock by default; LLM_PROVIDER=openai_compatible for regions without it.
+        bedrock_client = build_llm_client(model_id=config.bedrock_model_id, region=config.bedrock_region)
         # VKG endpoint used as template: "://vkg." is replaced with "://vkg-{ns}." per request
 
         from .clients.sources_registry import SourcesRegistry
@@ -176,10 +182,10 @@ async def _ensure_initialized():
         sources_registry = SourcesRegistry(
             table_name=config.data_sources_table,
             namespaces_table=os.environ.get("NAMESPACES_TABLE", ""),
-            region=config.bedrock_region,
+            region=aws_region,
         )
         _sources_registry = sources_registry
-        athena_executor = AthenaQueryExecutor(region=config.bedrock_region, sources_registry=sources_registry)
+        athena_executor = AthenaQueryExecutor(region=aws_region, sources_registry=sources_registry)
 
         # single-vs-cross-source dispatcher (Serve LLD §2.2.1 Option D).
         # Direct JDBC is the DEFAULT fast path for single-source queries (one
@@ -199,7 +205,7 @@ async def _ensure_initialized():
 
                 source_db_executor = SourceDBQueryExecutor(
                     data_sources_table=config.data_sources_table,
-                    region=config.bedrock_region,
+                    region=aws_region,
                     sources_registry=sources_registry,
                 )
                 logger.info("jdbc_dispatch_enabled")
@@ -219,7 +225,7 @@ async def _ensure_initialized():
 
                 redshift_executor = RedshiftDataAPIExecutor(
                     sources_registry=sources_registry,
-                    region=config.bedrock_region,
+                    region=aws_region,
                 )
                 logger.info("redshift_dispatch_enabled")
             except Exception as exc:
@@ -245,7 +251,7 @@ async def _ensure_initialized():
         # examples; missing file falls back gracefully.
         few_shot_loader = FewShotExampleLoader(
             bucket=os.environ.get("ONTOLOGY_BUCKET", ""),
-            region=config.bedrock_region,
+            region=aws_region,
         )
         nl_to_sparql = NLtoSPARQL(
             graph_client=neptune_client,

@@ -4,7 +4,13 @@
 """Unit tests for SCLConfig."""
 
 import pytest
-from coa_common.config import SCLConfig, resolve_region
+from coa_common.config import (
+    SCLConfig,
+    aws_dns_suffix,
+    aws_partition,
+    opensearch_signing_service,
+    resolve_region,
+)
 
 
 @pytest.mark.unit
@@ -96,3 +102,43 @@ class TestResolveRegion:
         monkeypatch.setenv("AWS_REGION", "")
         monkeypatch.setenv("AWS_DEFAULT_REGION", "eu-west-1")
         assert resolve_region() == ""
+
+
+@pytest.mark.unit
+class TestPartitionHelpers:
+    """ARN partition and endpoint DNS suffix follow the region."""
+
+    @pytest.mark.parametrize(
+        ("region", "partition", "suffix"),
+        [
+            ("us-east-1", "aws", "amazonaws.com"),
+            ("eu-west-1", "aws", "amazonaws.com"),
+            ("cn-north-1", "aws-cn", "amazonaws.com.cn"),
+            ("cn-northwest-1", "aws-cn", "amazonaws.com.cn"),
+            ("us-gov-west-1", "aws-us-gov", "amazonaws.com"),
+        ],
+    )
+    def test_partition_and_suffix(self, region, partition, suffix):
+        assert aws_partition(region) == partition
+        assert aws_dns_suffix(region) == suffix
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("endpoint", "service"),
+    [
+        ("https://abc123.us-east-1.aoss.amazonaws.com", "aoss"),
+        ("https://abc123.cn-north-1.aoss.amazonaws.com.cn", "aoss"),
+        ("https://abc123.aoss.us-west-2.on.aws", "aoss"),
+        ("abc123.us-east-1.aoss.amazonaws.com", "aoss"),
+        ("https://vpc-coa-dev-vector-store-xyz.cn-north-1.es.amazonaws.com.cn", "es"),
+        ("vpc-coa-dev-vector-store-xyz.cn-northwest-1.es.amazonaws.com.cn:443", "es"),
+        ("https://search-demo-xyz.us-east-1.es.amazonaws.com/", "es"),
+        # Not fooled by "es" elsewhere in the name.
+        ("https://es.amazonaws.com.example.com", "aoss"),
+        ("", "aoss"),
+    ],
+)
+def test_opensearch_signing_service(endpoint, service):
+    """Managed domains sign for ``es``; everything else stays ``aoss``."""
+    assert opensearch_signing_service(endpoint) == service

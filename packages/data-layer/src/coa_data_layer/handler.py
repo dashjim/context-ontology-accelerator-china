@@ -23,6 +23,7 @@ from urllib.parse import quote
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
+from coa_common.config import aws_dns_suffix
 from coa_common.constants import (
     DESCRIBE_SCHEMA_RESOURCE,
     ONTOLOGY_PROXY_LAMBDA_ARN_ENV,
@@ -42,7 +43,7 @@ REGION = os.environ.get("AWS_REGION", "us-east-1")
 # ontology.
 ONTOLOGY_PROXY_LAMBDA_ARN = os.environ.get(ONTOLOGY_PROXY_LAMBDA_ARN_ENV, "")
 
-AGENTCORE_ENDPOINT = f"https://bedrock-agentcore.{REGION}.amazonaws.com"
+AGENTCORE_ENDPOINT = f"https://bedrock-agentcore.{REGION}.{aws_dns_suffix(REGION)}"
 ENCODED_ARN = quote(RUNTIME_ARN, safe="")
 INVOKE_URL = f"{AGENTCORE_ENDPOINT}/runtimes/{ENCODED_ARN}/invocations?qualifier=DEFAULT"
 

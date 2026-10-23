@@ -29,6 +29,8 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # SMUS admin principal(s) — required, comma-separated IAM role/user ARN(s)
 # that human admins federate into (e.g. your IAM Identity Center
 # permission-set role): SCL_SMUS_ADMIN_ARNS=arn:aws:iam::123456789012:role/... make deploy-dev
+# Any other CDK context, appended verbatim (space-separated `-c key=value`):
+#   SCL_EXTRA_CONTEXT="-c build_pip_index_url=https://... -c edge_waf=false" make deploy-dev
 CONTEXT="--context env=$ENV"
 [ -n "${SCL_PREFIX:-}" ]        && CONTEXT="$CONTEXT --context resource_prefix=$SCL_PREFIX"
 [ -n "${SCL_PROJECT_TAG:-}" ]   && CONTEXT="$CONTEXT --context project_tag=$SCL_PROJECT_TAG"
@@ -47,9 +49,10 @@ CONTEXT="--context env=$ENV"
 [ -n "${SCL_NL2SQL_GRAPH_EXPAND:-}" ] && CONTEXT="$CONTEXT --context serve_nl2sql_graph_expand=$SCL_NL2SQL_GRAPH_EXPAND"
 [ -n "${SCL_NL2SQL_GRAPH_EXPAND_MAX_TABLES:-}" ] && CONTEXT="$CONTEXT --context serve_nl2sql_graph_expand_max_tables=$SCL_NL2SQL_GRAPH_EXPAND_MAX_TABLES"
 [ -n "${SCL_SMUS_ADMIN_ARNS:-}" ] && CONTEXT="$CONTEXT --context smus_admin_principal_arns=$SCL_SMUS_ADMIN_ARNS"
+[ -n "${SCL_EXTRA_CONTEXT:-}" ] && CONTEXT="$CONTEXT $SCL_EXTRA_CONTEXT"
 
 # ── Preflight: SMUS admin principal ──────────────────────────────────────
-# NamespaceStack falls back to arn:aws:iam::<account>:role/Admin when
+# NamespaceStack falls back to arn:<partition>:iam::<account>:role/Admin when
 # SCL_SMUS_ADMIN_ARNS is unset. Validate the fallback before CDK runs while
 # preserving the difference between missing credentials, access denial, service
 # failure, and a confirmed NoSuchEntity result.
@@ -112,7 +115,7 @@ cd "$REPO_ROOT"
 
 # ── Preflight ────────────────────────────────────────────────────────────
 echo ""
-./scripts/preflight-deploy.sh
+ENV="$ENV" ./scripts/preflight-deploy.sh
 
 # ── Build ────────────────────────────────────────────────────────────────
 echo ""

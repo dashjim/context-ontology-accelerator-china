@@ -108,6 +108,11 @@ class TestSourceDBQueryExecutor:
         assert not _SECRET_ARN_PATTERN.match("not-an-arn")
         assert not _SECRET_ARN_PATTERN.match("arn:aws:s3:::my-bucket")
         assert _SECRET_ARN_PATTERN.match("arn:aws:secretsmanager:us-east-1:123456789012:secret:coa/db-creds-abc123")
+        assert _SECRET_ARN_PATTERN.match("arn:aws-cn:secretsmanager:cn-north-1:123456789012:secret:coa/db-creds-abc123")
+        assert _SECRET_ARN_PATTERN.match(
+            "arn:aws-us-gov:secretsmanager:us-gov-west-1:123456789012:secret:coa/db-creds-abc123"
+        )
+        assert not _SECRET_ARN_PATTERN.match("arn:evil:secretsmanager:us-east-1:123456789012:secret:x")
 
     @patch("coa_serve.clients.source_db.boto3")
     async def test_resolve_credentials_uses_new_key_schema(self, mock_source_boto3, _reg):

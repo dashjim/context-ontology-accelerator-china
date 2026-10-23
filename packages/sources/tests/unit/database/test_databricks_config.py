@@ -369,6 +369,24 @@ class TestConnectorRoleArnShape:
     def test_refuses_what_the_connector_will_refuse(self, resource):
         assert not dbx.role_arn_is_connector_assumable(f"arn:aws:iam::222233334444:role/{resource}")
 
+    @pytest.mark.parametrize(
+        ("region", "accepted", "refused"),
+        [
+            ("us-east-1", "aws", "aws-cn"),
+            ("cn-north-1", "aws-cn", "aws"),
+            ("us-gov-west-1", "aws-us-gov", "aws"),
+        ],
+    )
+    def test_partition_is_pinned_to_the_deployments_own(self, region, accepted, refused):
+        """The assume grant is written in the deployment's partition, so only that one is assumable."""
+        with patch.object(dbx, "AWS_REGION", region):
+            assert dbx.role_arn_is_connector_assumable(
+                f"arn:{accepted}:iam::222233334444:role/coa-dev-datasource-access-dbx"
+            )
+            assert not dbx.role_arn_is_connector_assumable(
+                f"arn:{refused}:iam::222233334444:role/coa-dev-datasource-access-dbx"
+            )
+
     def test_the_reserved_prefix_check_alone_would_have_admitted_it(self):
         """A separate check, not a consequence of the prefix rule: the offending characters
         sit in the PATH, after a good prefix."""

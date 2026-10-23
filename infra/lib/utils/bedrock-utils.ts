@@ -13,6 +13,8 @@
  * grant built on the wrong shape fails closed with AccessDenied.
  */
 
+import { Aws } from "aws-cdk-lib";
+
 /**
  * True when a model id is a geographic inference profile rather than a bare
  * foundation model.
@@ -33,13 +35,15 @@ export function isInferenceProfileId(modelId: string): boolean {
  * A foundation model is AWS-owned and its ARN carries an EMPTY account field;
  * an inference profile is account-scoped. Pass `"*"` for `region` and/or
  * `account` when building an IAM resource pattern rather than a concrete ARN.
+ * `partition` defaults to the deploying stack's `AWS::Partition`.
  */
 export function bedrockModelArn(
   modelId: string,
   region: string,
   account: string,
+  partition: string = Aws.PARTITION,
 ): string {
   return isInferenceProfileId(modelId)
-    ? `arn:aws:bedrock:${region}:${account}:inference-profile/${modelId}`
-    : `arn:aws:bedrock:${region}::foundation-model/${modelId}`;
+    ? `arn:${partition}:bedrock:${region}:${account}:inference-profile/${modelId}`
+    : `arn:${partition}:bedrock:${region}::foundation-model/${modelId}`;
 }

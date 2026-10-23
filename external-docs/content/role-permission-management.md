@@ -111,6 +111,8 @@ Cedar (at query execution time by the SQL Firewall) — see the
 | `columnDenylist` | `map[string, list[string]]` | These columns cannot be projected. `SELECT *` on a restricted table is denied. |
 | `allowedMetrics` | `list[string]` | Only these metric IDs can be evaluated. |
 
+Tables in `tableAllowlist` and the keys of `columnDenylist` are matched on the bare table name, case-insensitively: `sales.customers` and `customers` name the same table. A restriction therefore applies to every table of that name in the namespace, whichever database it belongs to.
+
 !!! note
     Data restrictions are **optional**. When omitted, the user has full query access to all data within their namespace (subject to Cedar action-level permissions).
 

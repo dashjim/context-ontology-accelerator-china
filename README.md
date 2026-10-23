@@ -1,5 +1,7 @@
 # ✦ Context Ontology Accelerator
 
+> **中文说明（AWS 中国区适配版）：[.github/README.md](.github/README.md)**
+
 An open-source semantic context layer for AWS that combines knowledge graphs, formal ontologies, and rule-based systems with modern AI — enabling agents to retrieve context, validate it against business logic, and determine correct actions.
 
 ## Architecture

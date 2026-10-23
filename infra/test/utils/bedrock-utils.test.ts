@@ -1,6 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+import { Aws } from "aws-cdk-lib";
 import {
   bedrockModelArn,
   isInferenceProfileId,
@@ -32,7 +33,7 @@ describe("bedrock-utils", () => {
   describe("bedrockModelArn", () => {
     it("builds an account-scoped ARN for an inference profile", () => {
       expect(
-        bedrockModelArn("jp.anthropic.claude-sonnet-4-6", "ap-northeast-1", "123456789012"),
+        bedrockModelArn("jp.anthropic.claude-sonnet-4-6", "ap-northeast-1", "123456789012", "aws"),
       ).toBe(
         "arn:aws:bedrock:ap-northeast-1:123456789012:inference-profile/jp.anthropic.claude-sonnet-4-6",
       );
@@ -42,16 +43,26 @@ describe("bedrock-utils", () => {
       // Foundation models are AWS-owned; an account in this position makes the
       // ARN name a resource that does not exist.
       expect(
-        bedrockModelArn("cohere.embed-v4:0", "ap-northeast-1", "123456789012"),
+        bedrockModelArn("cohere.embed-v4:0", "ap-northeast-1", "123456789012", "aws"),
       ).toBe("arn:aws:bedrock:ap-northeast-1::foundation-model/cohere.embed-v4:0");
     });
 
     it("supports wildcards for IAM resource patterns", () => {
-      expect(bedrockModelArn("cohere.embed-v4:0", "*", "*")).toBe(
+      expect(bedrockModelArn("cohere.embed-v4:0", "*", "*", "aws")).toBe(
         "arn:aws:bedrock:*::foundation-model/cohere.embed-v4:0",
       );
-      expect(bedrockModelArn("us.anthropic.claude-sonnet-5", "*", "123456789012")).toBe(
+      expect(bedrockModelArn("us.anthropic.claude-sonnet-5", "*", "123456789012", "aws")).toBe(
         "arn:aws:bedrock:*:123456789012:inference-profile/us.anthropic.claude-sonnet-5",
+      );
+    });
+
+    it("defaults the partition to the stack's AWS::Partition", () => {
+      // A literal "aws" partition makes every grant fail closed in aws-cn.
+      expect(bedrockModelArn("cohere.embed-v4:0", "*", "*")).toBe(
+        `arn:${Aws.PARTITION}:bedrock:*::foundation-model/cohere.embed-v4:0`,
+      );
+      expect(bedrockModelArn("cohere.embed-v4:0", "cn-north-1", "*", "aws-cn")).toBe(
+        "arn:aws-cn:bedrock:cn-north-1::foundation-model/cohere.embed-v4:0",
       );
     });
   });

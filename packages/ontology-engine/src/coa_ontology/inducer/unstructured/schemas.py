@@ -80,7 +80,7 @@ class UnstructuredInductionRequest(BaseModel):
     name: str  # the ontologyId — required
     graph_arn: str = Field(
         ...,
-        pattern=r"^(arn:aws:neptune-graph:[a-z0-9-]+:\d{12}:graph/[a-zA-Z0-9_-]+|neptune-db)$",
+        pattern=r"^(arn:(aws|aws-cn|aws-us-gov):neptune-graph:[a-z0-9-]+:\d{12}:graph/[a-zA-Z0-9_-]+|neptune-db)$",
         description=(
             "Neptune Analytics ARN (arn:aws:neptune-graph:<region>:<account>:graph/<id>) "
             "OR the literal string 'neptune-db' to use the server-configured Neptune Database endpoint"

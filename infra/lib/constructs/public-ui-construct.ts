@@ -10,6 +10,7 @@ import * as acm from "aws-cdk-lib/aws-certificatemanager";
 import { Construct } from "constructs";
 import { SCLConstruct } from "./scl-construct";
 import { AccessLogsBucket } from "./access-logs-bucket";
+import { isChinaRegion } from "../utils/deployment-switches";
 import { RuntimeConfig, RUNTIME_CONFIG_FILENAME } from "@coa/shared";
 
 /**
@@ -62,9 +63,17 @@ export function buildContentSecurityPolicy(
   const apiOrigin = originOf(runtimeConfig.apiEndpoint);
   const authOrigin = originOf(runtimeConfig.authority);
 
+  // Endpoint DNS suffix for the region (`amazonaws.com.cn` in China). Falls
+  // back to the stack's AWS::URLSuffix when the region is an unresolved token.
+  const urlSuffix = cdk.Token.isUnresolved(runtimeConfig.region)
+    ? cdk.Aws.URL_SUFFIX
+    : runtimeConfig.region?.startsWith("cn-")
+      ? "amazonaws.com.cn"
+      : "amazonaws.com";
+
   // AgentCore origin for SSE streaming (Playground fetches directly)
   const agentCoreOrigin = runtimeConfig.serveRuntimeArn
-    ? `https://bedrock-agentcore.${runtimeConfig.region}.amazonaws.com`
+    ? `https://bedrock-agentcore.${runtimeConfig.region}.${urlSuffix}`
     : undefined;
 
   // Cognito user-pool IdP endpoint. The browser OIDC flow always calls this
@@ -73,7 +82,7 @@ export function buildContentSecurityPolicy(
   // rather than relying on `authority` — `authority` can be empty/unresolved
   // at synth, which silently drops the origin and blocks sign-in.
   const cognitoOrigin = runtimeConfig.region
-    ? `https://cognito-idp.${runtimeConfig.region}.amazonaws.com`
+    ? `https://cognito-idp.${runtimeConfig.region}.${urlSuffix}`
     : undefined;
 
   // Cognito HOSTED-UI origin — a DIFFERENT host from `cognitoOrigin` above, and
@@ -109,14 +118,14 @@ export function buildContentSecurityPolicy(
   // OSI import via the UI fails with "Failed to fetch" (issue 103).
   const s3Origins = runtimeConfig.region
     ? [
-        `https://*.s3.${runtimeConfig.region}.amazonaws.com`,
-        `https://s3.${runtimeConfig.region}.amazonaws.com`,
+        `https://*.s3.${runtimeConfig.region}.${urlSuffix}`,
+        `https://s3.${runtimeConfig.region}.${urlSuffix}`,
         // us-east-1 (and some boto3/botocore versions) presign S3 URLs against
         // the legacy global host `<bucket>.s3.amazonaws.com`, which has no
         // region segment and so matches neither regional form above. Allowlist
         // it too, or the browser blocks the presigned proposal fetch (issue #211).
-        `https://*.s3.amazonaws.com`,
-        `https://s3.amazonaws.com`,
+        `https://*.s3.${urlSuffix}`,
+        `https://s3.${urlSuffix}`,
       ]
     : [];
 
@@ -264,10 +273,12 @@ export class PublicUIConstruct extends SCLConstruct {
       },
     );
 
-    // CloudFront distribution with S3 OAC origin
-    const s3Origin = origins.S3BucketOrigin.withOriginAccessControl(
-      this.uiBucket,
-    );
+    // CloudFront distribution with S3 OAC origin. AWS China CloudFront has no
+    // Origin Access Control, so it uses an Origin Access Identity (the bucket
+    // is SSE-S3, which an OAI can read).
+    const s3Origin = isChinaRegion(this)
+      ? origins.S3BucketOrigin.withOriginAccessIdentity(this.uiBucket)
+      : origins.S3BucketOrigin.withOriginAccessControl(this.uiBucket);
 
     // Dedicated CloudFront access-log bucket. Legacy standard logging delivers
     // via a bucket ACL grant, so this bucket enables ACLs

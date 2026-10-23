@@ -75,6 +75,13 @@ class TestContextManagerClientInit:
         assert "arn%3Aaws%3Abedrock-agentcore" in client._url
         assert client._url.endswith("/invocations?qualifier=DEFAULT")
 
+    def test_china_region_url_uses_cn_dns_suffix(self):
+        client = ContextManagerClient(
+            runtime_arn="arn:aws-cn:bedrock-agentcore:cn-north-1:1:runtime/cm",
+            region="cn-north-1",
+        )
+        assert client._url.startswith("https://bedrock-agentcore.cn-north-1.amazonaws.com.cn/runtimes/")
+
 
 @pytest.mark.unit
 class TestContextManagerInvoke:

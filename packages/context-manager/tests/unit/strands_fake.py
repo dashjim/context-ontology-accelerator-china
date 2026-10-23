@@ -45,6 +45,19 @@ class FakeAgent:
 class FakeBedrockModel:
     """Stands in for ``strands.models.BedrockModel``; records its kwargs."""
 
+    DEFAULT_MODEL_ID = "global.anthropic.claude-sonnet-4-6"
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.config = {"model_id": kwargs.get("model_id", self.DEFAULT_MODEL_ID)}
+
+    def update_config(self, **config):
+        self.config.update(config)
+
+
+class FakeOpenAIModel:
+    """Stands in for ``strands.models.openai.OpenAIModel``; records its kwargs."""
+
     def __init__(self, **kwargs):
         self.kwargs = kwargs
 
@@ -58,6 +71,7 @@ def install_fake_strands(driver: Callable[[dict], Awaitable[None]]) -> None:
     """
     strands = types.ModuleType("strands")
     strands_models = types.ModuleType("strands.models")
+    strands_models_openai = types.ModuleType("strands.models.openai")
 
     def tool(fn):  # passthrough decorator — keep the async callable
         return fn
@@ -70,11 +84,14 @@ def install_fake_strands(driver: Callable[[dict], Awaitable[None]]) -> None:
     strands.Agent = agent_factory
     strands.tool = tool
     strands_models.BedrockModel = FakeBedrockModel
+    strands_models_openai.OpenAIModel = FakeOpenAIModel
     sys.modules["strands"] = strands
     sys.modules["strands.models"] = strands_models
+    sys.modules["strands.models.openai"] = strands_models_openai
 
 
 def uninstall_fake_strands() -> None:
     """Remove the fake modules so a later import gets the real (or no) package."""
     sys.modules.pop("strands", None)
     sys.modules.pop("strands.models", None)
+    sys.modules.pop("strands.models.openai", None)

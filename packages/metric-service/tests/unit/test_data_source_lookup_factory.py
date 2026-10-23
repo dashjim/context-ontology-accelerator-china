@@ -55,6 +55,25 @@ class TestBuildDataSourceLookup:
 
         assert isinstance(lookup, SmusCatalogDataSourceLookup)
 
+    @patch("coa_metrics.data_source_lookup_factory._resolve_project_id", return_value="prj-9")
+    def test_dynamodb_backend_needs_no_smus_domain_id(self, mock_resolve):
+        from coa_metrics.data_source_lookup_factory import build_data_source_lookup
+        from coa_metrics.lookups import SmusCatalogDataSourceLookup
+
+        env = {k: v for k, v in _FULL_ENV.items() if k != "SMUS_DOMAIN_ID"}
+        env |= {"METADATA_STORE_BACKEND": "dynamodb", "METADATA_STORE_TABLE": "metadata-store"}
+        with patch.dict("os.environ", env, clear=True):
+            lookup = build_data_source_lookup("ns-1")
+
+        assert isinstance(lookup, SmusCatalogDataSourceLookup)
+
+    def test_dynamodb_backend_requires_metadata_store_table(self):
+        from coa_metrics.data_source_lookup_factory import build_data_source_lookup
+
+        env = {**_FULL_ENV, "METADATA_STORE_BACKEND": "dynamodb"}
+        with patch.dict("os.environ", env, clear=True):
+            assert build_data_source_lookup("ns-1") is None
+
 
 class TestResolveProjectId:
     """Tests for unprovisioned namespaces versus registry failures."""

@@ -220,7 +220,7 @@ export class WebStack extends SCLStack {
             new iam.PolicyStatement({
               actions: ["ssm:GetParameter"],
               resources: [
-                `arn:aws:ssm:${region}:${this.account}:parameter${name}`,
+                `arn:${this.partition}:ssm:${region}:${this.account}:parameter${name}`,
               ],
             }),
           ]),
@@ -318,7 +318,7 @@ export class WebStack extends SCLStack {
           new iam.PolicyStatement({
             actions: ["cognito-idp:UpdateUserPoolClient"],
             resources: [
-              `arn:aws:cognito-idp:${this.region}:${this.account}:userpool/${userPoolId}`,
+              `arn:${this.partition}:cognito-idp:${this.region}:${this.account}:userpool/${userPoolId}`,
             ],
           }),
         ]),
@@ -334,7 +334,7 @@ export class WebStack extends SCLStack {
         "gatewayresponse.header.X-Content-Type-Options": "'nosniff'",
       };
 
-      const apiArn = `arn:aws:apigateway:${this.region}::/restapis/${props.apiRestApiId}`;
+      const apiArn = `arn:${this.partition}:apigateway:${this.region}::/restapis/${props.apiRestApiId}`;
 
       // Update 4XX gateway response
       new cr.AwsCustomResource(this, "UpdateApiCors4XX", {

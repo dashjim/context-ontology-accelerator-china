@@ -12,7 +12,14 @@ import { Construct } from "constructs";
 import { resolveContext } from "../../context";
 import { agentCoreSupportedSubnets } from "../../utils/agentcore-az";
 import { brandEnv } from "../../utils/brand-env";
-import { parseEcrImageUri } from "../../utils/ecr-utils";
+import {
+  applyAgentCorePlatformVersion,
+  imageBuildArgs,
+} from "../../utils/deployment-switches";
+import {
+  agentRuntimeArtifactFromImageUri,
+  parseEcrImageUri,
+} from "../../utils/ecr-utils";
 import { Paths } from "../../paths";
 import { SCLStack } from "../../constructs";
 
@@ -48,6 +55,7 @@ export class McpStack extends SCLStack {
 
     const region = cdk.Stack.of(this).region;
     const account = cdk.Stack.of(this).account;
+    const partition = cdk.Stack.of(this).partition;
     const { ssmPrefix } = resolveContext(this.node);
 
     const runtimeName = this.prefixed("mcp-server").replace(/-/g, "_");
@@ -127,6 +135,7 @@ export class McpStack extends SCLStack {
         directory: Paths.root,
         file: "packages/context-manager/Dockerfile",
         platform: Platform.LINUX_ARM64,
+        buildArgs: imageBuildArgs(this),
       });
       imageUri = dockerAsset.imageUri;
     }
@@ -134,8 +143,7 @@ export class McpStack extends SCLStack {
     // ── AgentCore Runtime (MCP protocol) ──────────────────────────────
     const runtime = new bedrockagentcore.Runtime(this, "McpRuntime", {
       runtimeName,
-      agentRuntimeArtifact:
-        bedrockagentcore.AgentRuntimeArtifact.fromImageUri(imageUri),
+      agentRuntimeArtifact: agentRuntimeArtifactFromImageUri(imageUri),
       protocolConfiguration: bedrockagentcore.ProtocolType.MCP,
       authorizerConfiguration:
         bedrockagentcore.RuntimeAuthorizerConfiguration.usingJWT(
@@ -190,6 +198,7 @@ export class McpStack extends SCLStack {
       description:
         "MCP Server - protocol adapter with PKCE auth, forwards execution to Context Manager",
     });
+    applyAgentCorePlatformVersion(runtime);
 
     // ── IAM Policies (minimal) ────────────────────────────────────────
 
@@ -220,7 +229,9 @@ export class McpStack extends SCLStack {
     runtime.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ["ssm:GetParameter"],
-        resources: [`arn:aws:ssm:${region}:${account}:parameter${ssmPrefix}/*`],
+        resources: [
+          `arn:${partition}:ssm:${region}:${account}:parameter${ssmPrefix}/*`,
+        ],
       }),
     );
 
@@ -231,7 +242,9 @@ export class McpStack extends SCLStack {
           "bedrock-agentcore:InvokeAgentRuntime",
           "bedrock-agentcore:InvokeAgentRuntimeForUser",
         ],
-        resources: [`arn:aws:bedrock-agentcore:${region}:${account}:runtime/*`],
+        resources: [
+          `arn:${partition}:bedrock-agentcore:${region}:${account}:runtime/*`,
+        ],
       }),
     );
 

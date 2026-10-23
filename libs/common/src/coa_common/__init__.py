@@ -24,7 +24,13 @@ from coa_common.bedrock import (
     GuardrailBlockedError,
     InputTooLargeError,
 )
-from coa_common.config import SCLConfig, resolve_region
+from coa_common.config import (
+    SCLConfig,
+    aws_dns_suffix,
+    aws_partition,
+    opensearch_signing_service,
+    resolve_region,
+)
 from coa_common.constants import (
     ACTIVE_INGESTION_STATUSES,
     DEFAULT_DELETE_PREV_VERSIONS,
@@ -194,6 +200,9 @@ __all__ = [
     "list_objects",
     "parse_bucket_from_arn",
     "resolve_region",
+    "aws_partition",
+    "aws_dns_suffix",
+    "opensearch_signing_service",
     "setup_logging",
     "upload_file",
     "upload_json",

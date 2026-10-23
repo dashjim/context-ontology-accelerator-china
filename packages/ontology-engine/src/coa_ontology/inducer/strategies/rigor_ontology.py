@@ -25,7 +25,10 @@ import re
 
 import boto3
 from coa_common import async_boto_config
+from coa_common.bedrock import extract_text_blocks
+from coa_common.bedrock_access import map_bedrock_model_id, prepare_bedrock_client
 from coa_common.bedrock_metrics import CostTracker
+from coa_common.llm_provider import is_openai_compatible, openai_compat_runtime_client
 from rdflib import OWL, RDF, RDFS, XSD, BNode, Graph, Literal, Namespace, URIRef
 from rdflib.collection import Collection
 from rdflib.namespace import SKOS
@@ -633,10 +636,13 @@ class RigorOntologyStrategy(InductionStrategy):
     # ── LLM calls ────────────────────────────────────────────────────
 
     def _get_llm_client(self, config: dict):
+        boto_config = async_boto_config(read_timeout=120)
+        if is_openai_compatible():
+            return openai_compat_runtime_client(boto_config)
         return boto3.client(
             "bedrock-runtime",
-            region_name=config.get("llm_region", "us-east-1"),
-            config=async_boto_config(read_timeout=120),
+            region_name=prepare_bedrock_client(config.get("llm_region", "us-east-1")),
+            config=boto_config,
         )
 
     def _call_llm(
@@ -649,6 +655,7 @@ class RigorOntologyStrategy(InductionStrategy):
         import time as _t
 
         _t0 = _t.perf_counter()
+        model_id = map_bedrock_model_id(model_id)
         try:
             resp = llm_client.converse(
                 modelId=model_id,
@@ -662,7 +669,9 @@ class RigorOntologyStrategy(InductionStrategy):
             # generation, not rerank). No-op when no tracker was threaded in.
             if self._cost_tracker is not None:
                 self._cost_tracker.record_from_converse("generate", model_id, resp)
-            result = resp["output"]["message"]["content"][0]["text"]
+            # By block type, not position: a reasoning model (e.g. gpt-oss) puts a
+            # reasoningContent block (no "text" key) ahead of the answer.
+            result = extract_text_blocks(resp["output"]["message"]["content"])
             log.info(
                 "RIGOR LLM: model=%s prompt_chars=%d response_chars=%d %.0fms",
                 model_id,

@@ -79,6 +79,7 @@ import time
 import traceback
 
 import structlog
+from coa_common.bedrock_access import map_bedrock_model_id, prepare_bedrock_client
 from coa_common.config import resolve_region
 from coa_common.constants import (
     DEFAULT_CHUNK_OVERLAP,
@@ -101,7 +102,9 @@ from coa_common.constants import (
 )
 from coa_common.dao import DynamoDBDAO
 from coa_common.embeddings import make_llama_index_embedding
+from coa_common.llm_provider import is_openai_compatible
 from coa_common.logging import setup_logging
+from coa_common.opensearch import patch_graphrag_signing_service
 from coa_common.s3 import get_s3_client, list_objects, read_file_bytes
 from coa_control_plane_server.models.source_status import SourceStatus
 
@@ -956,6 +959,9 @@ def _setup_graphrag(tenant_id: str):
     # llama_index's OpensearchVectorClient at import time, so our retry wrapper
     # must be assigned last to win.
     _patch_graphrag_bulk_ingest_retry()
+    # graphrag signs for "aoss" only; a managed domain (vector_store=opensearch) needs "es".
+    # Before the caller opens the vector store, which is when graphrag builds its clients.
+    patch_graphrag_signing_service(os.environ.get("OPENSEARCH_ENDPOINT", ""))
 
     GraphRAGConfig.aws_region = AWS_REGION
     GraphRAGConfig.enable_versioning = ENABLE_VERSIONING
@@ -969,7 +975,28 @@ def _setup_graphrag(tenant_id: str):
         model_id=BEDROCK_EMBED_MODEL_ID, dimensions=BEDROCK_EMBED_DIMENSIONS, region=AWS_REGION
     )
     GraphRAGConfig.embed_dimensions = BEDROCK_EMBED_DIMENSIONS
-    if BEDROCK_MODEL_ARN:
+    if is_openai_compatible():
+        # No Bedrock here, so the extraction LLM is ALWAYS an instance: a model
+        # string (or no setting at all) would make the toolkit build BedrockConverse.
+        # The model id is the one the Bedrock path would use, mapped by
+        # OPENAI_COMPAT_MODEL_MAP / OPENAI_COMPAT_CHAT_MODEL. Same token, timeout and
+        # retry bounds as below (the SDK's retries and llama_index's tenacity layer
+        # both take max_retries, as botocore's and BedrockConverse's do); one timeout
+        # covers connect and read. Picklable for the ProcessPool fan-out: the SDK
+        # client is rebuilt in the worker on first use.
+        if USE_BATCH_INFERENCE:
+            raise ValueError("USE_BATCH_INFERENCE=true needs Bedrock batch inference; unset it for openai_compatible")
+        from coa_common.openai_compat import make_llama_index_llm
+        from graphrag_toolkit.lexical_graph.config import DEFAULT_EXTRACTION_MODEL
+
+        GraphRAGConfig.extraction_llm = make_llama_index_llm(
+            BEDROCK_MODEL_ARN or os.environ.get("EXTRACTION_MODEL", DEFAULT_EXTRACTION_MODEL),
+            temperature=0.0,
+            max_tokens=EXTRACTION_MAX_TOKENS,
+            timeout=EXTRACTION_TIMEOUT_SECONDS,
+            max_retries=EXTRACTION_MAX_ATTEMPTS,
+        )
+    elif BEDROCK_MODEL_ARN:
         # Pass the extraction LLM as an INSTANCE, not a model string and not a JSON
         # config. All three reach BedrockConverse, but only the instance carries a
         # timeout: to_llm() (config.py) reads just model/temperature/max_tokens/
@@ -1029,12 +1056,15 @@ def _setup_graphrag(tenant_id: str):
         extraction_pool_size = max(EXTRACTION_NUM_THREADS_PER_WORKER, 10)
 
         GraphRAGConfig.extraction_llm = _picklable_bedrock_converse_cls()(
-            model=BEDROCK_MODEL_ARN,
+            # BEDROCK_MODEL_MAP / BEDROCK_MODEL_DEFAULT may swap the model (also by ARN).
+            model=map_bedrock_model_id(BEDROCK_MODEL_ARN),
             temperature=0.0,
             max_tokens=EXTRACTION_MAX_TOKENS,
             timeout=EXTRACTION_TIMEOUT_SECONDS,
             max_retries=EXTRACTION_MAX_ATTEMPTS,
-            region_name=AWS_REGION,
+            # BEDROCK_REGION may differ from AWS_REGION, which GraphRAGConfig keeps
+            # for OpenSearch/Neptune/S3.
+            region_name=prepare_bedrock_client(AWS_REGION),
             botocore_config=Config(
                 max_pool_connections=extraction_pool_size,
                 connect_timeout=EXTRACTION_CONNECT_TIMEOUT_SECONDS,

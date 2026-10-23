@@ -54,11 +54,17 @@ class MetadataStoreClient(ABC):
         """
 
     @abstractmethod
-    def delete_project(self, *, project_id: str) -> None:
+    def delete_project(self, *, project_id: str, force: bool = False) -> None:
         """Delete a project.
 
+        When *force* is False the backend refuses to delete a project that
+        still owns assets. When True the project is deleted together with its
+        assets — namespace teardown needs this, since every induced namespace
+        owns assets.
+
         Raises:
-            MetadataStoreError: on failure.
+            MetadataStoreNotFoundError: if the project does not exist.
+            MetadataStoreError: on any other failure.
         """
 
     @abstractmethod
@@ -145,6 +151,17 @@ class MetadataStoreClient(ABC):
 
         Raises:
             MetadataStoreError: on failure.
+        """
+
+    @abstractmethod
+    def find_asset_by_name(self, *, project_id: str, name: str, max_pages: int = 20) -> AssetResult | None:
+        """Look an asset up by its exact name, or ``None`` when it does not exist.
+
+        *max_pages* bounds backends that can only answer this by paging a
+        search; backends with an exact-match lookup may ignore it.
+
+        Raises:
+            MetadataStoreError: on failure. An absent asset is ``None``, not an error.
         """
 
     @abstractmethod

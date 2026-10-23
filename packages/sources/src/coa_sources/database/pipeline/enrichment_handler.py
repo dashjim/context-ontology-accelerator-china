@@ -24,6 +24,7 @@ import os
 import sys
 import time
 
+from coa_common.metadata_store import metadata_store_backend
 from coa_control_plane_server.models.source_status import SourceStatus
 
 from coa_sources.database.pipeline.enrichment_metrics import (
@@ -42,7 +43,8 @@ def handler() -> None:
     namespace_id = os.environ["NAMESPACE_ID"]
     scan_type = os.environ.get("SCAN_TYPE", "full")
     scan_job_sk = os.environ.get("SCAN_JOB_SK", scan_job_id)  # ISO timestamp SK
-    domain_id = os.environ["SMUS_DOMAIN_ID"]
+    # Required for SMUS only; the DynamoDB metadata store has no DataZone domain.
+    domain_id = os.environ["SMUS_DOMAIN_ID"] if metadata_store_backend() == "smus" else ""
     # Set by the Step Functions enrichment step from the execution input; a
     # re-scan of an already-approved source ends in RESCAN_REVIEW (the steward
     # reviews the drift) instead of PENDING_REVIEW. Absent/"false" on a first scan.

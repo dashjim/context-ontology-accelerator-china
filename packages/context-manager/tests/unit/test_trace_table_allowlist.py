@@ -70,6 +70,10 @@ class TestTablesVisibleTo:
         tables = ["catalog.schema.orders", '"db"."orders"', "db.employee_salaries"]
         assert tables_visible_to(tables, ALLOWLIST_PROFILE) == ["catalog.schema.orders", '"db"."orders"']
 
+    def test_tables_visible_to_qualified_allowlist_entry_matches_like_the_firewall(self):
+        profile = {"tableAllowlist": ["sales.orders"]}
+        assert tables_visible_to(["orders", "db.orders", "salaries"], profile) == ["orders", "db.orders"]
+
     def test_tables_visible_to_empty_allowlist_hides_every_table(self):
         assert tables_visible_to(["orders"], {"tableAllowlist": []}) == []
 

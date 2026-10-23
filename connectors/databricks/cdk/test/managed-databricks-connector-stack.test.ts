@@ -37,6 +37,7 @@ import {
   managedEnvFor,
   managedStack,
   policyStatements,
+  resourceArn,
   statementWithSid,
   synth,
   synthManaged,
@@ -141,7 +142,7 @@ describe("the connector role", () => {
     expect(actionsOf(statement)).toEqual(["ssm:GetParameter"]);
     // No separator before the prefix: an SSM parameter ARN is `parameter` immediately followed by a
     // name that already starts with "/", and `parameter//coa/...` matches nothing.
-    expect(statement.Resource).toBe(
+    expect(resourceArn(statement)).toBe(
       `arn:aws:ssm:us-east-1:123456789012:parameter${CONFIG_SSM_PREFIX}/*`,
     );
   });
@@ -151,7 +152,7 @@ describe("the connector role", () => {
     // a plausible-looking ARN. The role ARN matters most: a customer's trust policy names it, so a
     // connector able to rewrite it could redirect every future credential owner.
     const statement = statementWithSid(synthManaged(), "ReadDatabricksSourceParameters");
-    const granted = String(statement.Resource);
+    const granted = resourceArn(statement);
     const pattern = new RegExp(
       `^${granted.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`,
     );
@@ -183,8 +184,8 @@ describe("the connector role", () => {
     expect(actionsOf(statement)).toEqual(["sts:AssumeRole"]);
     // Account-agnostic on purpose: COA is deployed into the customer's account, so a rule excluding
     // the deployment account would refuse the most common topology outright.
-    expect(statement.Resource).toBe(`arn:aws:iam::*:role/${RESOURCE_PREFIX}datasource-access-*`);
-    expect(String(statement.Resource)).toContain("iam::*:");
+    expect(resourceArn(statement)).toBe(`arn:aws:iam::*:role/${RESOURCE_PREFIX}datasource-access-*`);
+    expect(resourceArn(statement)).toContain("iam::*:");
     // Null on sts:ExternalId, so an assume presenting none fails closed at IAM.
     expect(statement.Condition).toEqual({ Null: { "sts:ExternalId": "false" } });
     // No account condition of any kind, on either side of the assume.

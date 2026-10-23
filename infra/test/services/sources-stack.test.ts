@@ -9,6 +9,7 @@ import { Annotations, Template, Match } from "aws-cdk-lib/assertions";
 import { NetworkStack } from "../../lib/stacks/foundation/network-stack";
 import { StorageStack } from "../../lib/stacks/foundation/storage-stack";
 import { SourcesStack } from "../../lib/stacks/services/sources-stack";
+import { resolveCommercialPartition } from "../partition-helpers";
 
 // Mock bundlePython to avoid fingerprinting the entire repo root during tests.
 jest.mock("../../lib/utils/python-bundling", () => ({
@@ -43,13 +44,15 @@ describe("SourcesStack", () => {
       network,
       env: TEST_ENV,
     });
-    template = Template.fromStack(
-      new SourcesStack(app, "TestSources", {
-        network,
-        storage,
-        allowedOrigin: "https://test.example.com",
-        env: TEST_ENV,
-      }),
+    template = resolveCommercialPartition(
+      Template.fromStack(
+        new SourcesStack(app, "TestSources", {
+          network,
+          storage,
+          allowedOrigin: "https://test.example.com",
+          env: TEST_ENV,
+        }),
+      ),
     );
   });
 

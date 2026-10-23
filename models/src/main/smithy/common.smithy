@@ -83,12 +83,12 @@ string DisplayName
 @length(min: 1, max: 1024)
 string S3Prefix
 
-/// S3 bucket ARN. Format: arn:aws:s3:::{bucket-name}
-@pattern("^arn:aws:s3:::[a-z0-9][a-z0-9.\\-]{1,61}[a-z0-9]$")
+/// S3 bucket ARN. Format: arn:{partition}:s3:::{bucket-name}
+@pattern("^arn:(aws|aws-cn|aws-us-gov):s3:::[a-z0-9][a-z0-9.\\-]{1,61}[a-z0-9]$")
 @length(min: 20, max: 128)
 string S3BucketArn
 
 /// IAM role ARN for cross-account access.
-@pattern("^arn:(aws|aws-us-gov):iam::\\d{12}:role(/|/[\\u0021-\\u007F]+/)[\\w+=,.@\\-]+$")
+@pattern("^arn:(aws|aws-cn|aws-us-gov):iam::\\d{12}:role(/|/[\\u0021-\\u007F]+/)[\\w+=,.@\\-]+$")
 @length(min: 20, max: 2048)
 string IamRoleArn

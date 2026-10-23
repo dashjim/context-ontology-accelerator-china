@@ -7,6 +7,7 @@ import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import { Template, Match } from "aws-cdk-lib/assertions";
 import { McpStack } from "../../lib/stacks/services/mcp-stack";
+import { resolveCommercialPartition } from "../partition-helpers";
 import { DEFAULT_RESOURCE_PREFIX, DEFAULT_ENV } from "../../lib/constants";
 
 jest.mock("../../lib/utils/python-bundling", () => ({
@@ -44,7 +45,7 @@ describe("McpStack", () => {
       resourceRoleMappingsTable: mkTable("RRM"),
     });
 
-    template = Template.fromStack(stack);
+    template = resolveCommercialPartition(Template.fromStack(stack));
   });
 
   it("creates an AgentCore Runtime with MCP protocol", () => {
@@ -63,6 +64,12 @@ describe("McpStack", () => {
         AgentRuntimeName: "coa_dev_mcp_server",
       }),
     );
+  });
+
+  it("sets no PlatformVersion outside China", () => {
+    template.hasResourceProperties("AWS::BedrockAgentCore::Runtime", {
+      PlatformVersion: Match.absent(),
+    });
   });
 
   it("configures JWT authorizer", () => {

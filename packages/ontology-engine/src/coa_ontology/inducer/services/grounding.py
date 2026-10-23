@@ -28,7 +28,9 @@ import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 from coa_common import async_boto_config
 from coa_common.bedrock import extract_text_blocks
+from coa_common.bedrock_access import map_bedrock_model_id, prepare_bedrock_client
 from coa_common.bedrock_metrics import CostTracker
+from coa_common.llm_provider import is_openai_compatible, openai_compat_runtime_client
 
 from coa_ontology.inducer.schemas import ConceptMatch, MatchCandidate
 
@@ -298,7 +300,7 @@ class GroundingService:
         self.oc = ontology_catalog
         self.eg = embedding_generator
         self._llm_region = llm_region
-        self._llm_model_id = llm_model_id
+        self._llm_model_id = map_bedrock_model_id(llm_model_id)
         self._bedrock = None
         # Optional per-job Bedrock usage tracker. When present, every rerank
         # converse call records its token usage under the "rerank" stage.
@@ -312,13 +314,20 @@ class GroundingService:
 
     @property
     def bedrock(self):
-        """Lazily create and cache the Bedrock runtime client for rerank calls."""
+        """Lazily create and cache the Bedrock runtime client for rerank calls.
+
+        On ``LLM_PROVIDER=openai_compatible`` this is the Converse-shaped
+        OpenAI-compatible stand-in, which raises the same botocore errors the
+        rerank error handling below already classifies.
+        """
         if self._bedrock is None:
-            self._bedrock = boto3.client(
-                "bedrock-runtime",
-                region_name=self._llm_region,
-                config=async_boto_config(read_timeout=120, max_pool_connections=_BEDROCK_MAX_POOL_CONNECTIONS),
-            )
+            config = async_boto_config(read_timeout=120, max_pool_connections=_BEDROCK_MAX_POOL_CONNECTIONS)
+            if is_openai_compatible():
+                self._bedrock = openai_compat_runtime_client(config)
+            else:
+                self._bedrock = boto3.client(
+                    "bedrock-runtime", region_name=prepare_bedrock_client(self._llm_region), config=config
+                )
         return self._bedrock
 
     def ground_class(

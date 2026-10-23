@@ -20,3 +20,8 @@ graphrag-lexical-graph==3.18.7
 opensearch-py==3.2.0
 llama-index-vector-stores-opensearch==1.2.0
 llama-index-core==0.14.23
+# OpenAI-compatible extraction LLM (OpenAILike) for LLM_PROVIDER=openai_compatible
+# (regions without Bedrock); imported only on that provider. Pinned to uv.lock.
+llama-index-llms-openai-like==0.8.1
+llama-index-llms-openai==0.8.3
+openai==2.54.0

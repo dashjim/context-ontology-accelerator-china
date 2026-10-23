@@ -79,6 +79,16 @@ _PRICING: dict[str, dict[str, float]] = {
         "input": 2.50 / 1_000_000,
         "output": 12.50 / 1_000_000,
     },
+    # OpenAI gpt-oss, the BEDROCK_MODEL_MAP targets for regions where Anthropic
+    # models are not offered. ponytail: confirm vs AWS pricing page
+    "openai.gpt-oss-120b-1:0": {
+        "input": 0.15 / 1_000_000,
+        "output": 0.60 / 1_000_000,
+    },
+    "openai.gpt-oss-20b-1:0": {
+        "input": 0.07 / 1_000_000,
+        "output": 0.30 / 1_000_000,
+    },
 }
 
 # ponytail: family-prefix fallback so a model-version bump doesn't silently zero out cost.

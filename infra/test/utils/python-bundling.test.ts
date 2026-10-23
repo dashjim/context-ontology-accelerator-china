@@ -5,9 +5,12 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 
+import type * as cdk from "aws-cdk-lib";
+
 import {
   _computeSourceHash,
   _uvInstallCommand,
+  bundlePython,
 } from "../../lib/utils/python-bundling";
 
 /**
@@ -356,5 +359,36 @@ describe("_uvInstallCommand (local install uses uv, not host pip)", () => {
 
   it("returns null when there are no dependencies to install", () => {
     expect(_uvInstallCommand({ srcDirs: [] })).toBeNull();
+  });
+});
+
+/**
+ * The local uv step inherits the host environment (UV_DEFAULT_INDEX), but the
+ * Docker fallback does not, so the host's PIP_INDEX_URL is forwarded to it —
+ * and only when set, since the bundling options are part of the asset hash.
+ */
+describe("bundlePython Docker fallback package index", () => {
+  const saved = process.env.PIP_INDEX_URL;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.PIP_INDEX_URL;
+    else process.env.PIP_INDEX_URL = saved;
+  });
+
+  function fallbackEnvironment(): Record<string, string> | undefined {
+    const code = bundlePython({ srcDirs: [], pipDeps: ["structlog"] });
+    return (code as unknown as { options: cdk.AssetOptions }).options.bundling
+      ?.environment;
+  }
+
+  it("adds no environment when PIP_INDEX_URL is unset", () => {
+    delete process.env.PIP_INDEX_URL;
+    expect(fallbackEnvironment()).toBeUndefined();
+  });
+
+  it("forwards the host PIP_INDEX_URL", () => {
+    process.env.PIP_INDEX_URL = "https://pypi.example.cn/simple";
+    expect(fallbackEnvironment()).toEqual({
+      PIP_INDEX_URL: "https://pypi.example.cn/simple",
+    });
   });
 });

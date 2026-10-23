@@ -1,7 +1,11 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import { parseEcrImageUri } from "../../lib/utils/ecr-utils";
+import * as cdk from "aws-cdk-lib";
+import {
+  agentRuntimeArtifactFromImageUri,
+  parseEcrImageUri,
+} from "../../lib/utils/ecr-utils";
 
 describe("parseEcrImageUri", () => {
   it("parses a standard single-segment repo with tag", () => {
@@ -43,6 +47,16 @@ describe("parseEcrImageUri", () => {
     );
   });
 
+  it("derives the aws-cn partition for a China region URI", () => {
+    const result = parseEcrImageUri(
+      "123456789012.dkr.ecr.cn-north-1.amazonaws.com.cn/scl:v1",
+    );
+    expect(result.region).toBe("cn-north-1");
+    expect(result.repositoryArn).toBe(
+      "arn:aws-cn:ecr:cn-north-1:123456789012:repository/scl",
+    );
+  });
+
   it("defaults tag to latest when not specified", () => {
     const result = parseEcrImageUri(
       "123456789012.dkr.ecr.us-east-1.amazonaws.com/scl",
@@ -67,5 +81,27 @@ describe("parseEcrImageUri", () => {
     expect(() =>
       parseEcrImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/:tag"),
     ).toThrow("empty repository name");
+  });
+});
+
+describe("agentRuntimeArtifactFromImageUri", () => {
+  const render = (uri: string) =>
+    new cdk.Stack().resolve(agentRuntimeArtifactFromImageUri(uri)._render());
+
+  it("accepts a China ECR URI and renders it verbatim", () => {
+    const uri =
+      "123456789012.dkr.ecr.cn-north-1.amazonaws.com.cn/coa:context-manager";
+    expect(render(uri)).toEqual({ containerUri: uri });
+  });
+
+  it("passes a commercial URI through the L2 unchanged", () => {
+    const uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/coa:latest";
+    expect(render(uri)).toEqual({ containerUri: uri });
+  });
+
+  it("keeps the L2 validation for anything that is not a China ECR URI", () => {
+    expect(() =>
+      agentRuntimeArtifactFromImageUri("docker.io/library/nginx:latest"),
+    ).toThrow(/Invalid ECR container URI/);
   });
 });

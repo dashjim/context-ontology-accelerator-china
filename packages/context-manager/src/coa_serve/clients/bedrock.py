@@ -27,6 +27,7 @@ import structlog
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import ClientError
 from coa_common import BedrockEmbedder, resolve_region
+from coa_common.bedrock_access import map_bedrock_model_id, prepare_bedrock_client
 from coa_common.constants import DEFAULT_EMBED_MODEL_ID
 from coa_common.guardrail_metrics import (
     COMPONENT_NL_TO_SPARQL,
@@ -355,7 +356,7 @@ class BedrockLLMClient:
                 if self._client is None:
                     self._client = boto3.client(
                         "bedrock-runtime",
-                        region_name=self._region,
+                        region_name=prepare_bedrock_client(self._region),
                         config=BotoConfig(
                             read_timeout=int(os.environ.get("BEDROCK_READ_TIMEOUT", "120")),
                             connect_timeout=int(os.environ.get("BEDROCK_CONNECT_TIMEOUT", "10")),
@@ -834,7 +835,8 @@ class BedrockLLMClient:
                 content.append({"text": guard_content})
 
         kwargs: dict[str, Any] = {
-            "modelId": effective_model_id,
+            # BEDROCK_MODEL_MAP / BEDROCK_MODEL_DEFAULT apply to defaults and overrides alike.
+            "modelId": map_bedrock_model_id(effective_model_id),
             "messages": [{"role": "user", "content": content}],
             "inferenceConfig": {
                 "maxTokens": max_tokens,

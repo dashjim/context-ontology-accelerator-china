@@ -23,6 +23,18 @@ import { SclMonitoring } from "../../constructs";
 import { Paths } from "../../paths";
 import { resolveContext } from "../../context";
 import { bundlePython } from "../../utils/python-bundling";
+import {
+  grantLlmProviderSecret,
+  imageBuildArgs,
+  importMetadataStoreTable,
+  grantVectorStoreDomain,
+  llmProviderEnv,
+  metadataStoreEnv,
+  resolveVectorStore,
+  VECTOR_STORE_WRITE_ACTIONS,
+  vectorStoreDomainArn,
+  vectorStoreDomainName,
+} from "../../utils/deployment-switches";
 import { NetworkStack } from "../foundation/network-stack";
 import {
   DEFAULT_BEDROCK_MODEL_ID,
@@ -36,12 +48,13 @@ export interface OntologyStackProps extends cdk.StackProps {
   readonly neptuneClusterEndpoint: string;
   readonly ontologyArtifactsBucket: s3.IBucket;
   /**
-   * Required: scopes the task role's DataZone IAM grants to a single
-   * domain. We never deploy without one — running with no domain would
-   * either need a wildcard policy (forbidden) or break the catalog reader
-   * at runtime, so fail at synth time instead.
+   * Required on the SMUS metadata store: scopes the task role's DataZone IAM
+   * grants to a single domain. We never deploy without one — running with no
+   * domain would either need a wildcard policy (forbidden) or break the
+   * catalog reader at runtime, so fail at synth time instead. Unused (and
+   * absent) with `metadata_store_backend=dynamodb`.
    */
-  readonly smusDomainId: string;
+  readonly smusDomainId?: string;
   /**
    * CORS allowed origin for the API proxy Lambda.
    * Production deployments require an explicit origin (e.g. https://app.example.com).
@@ -91,7 +104,9 @@ export class OntologyStack extends SCLStack {
     super(scope, id, props);
     this.addComponentTag("ontology-engine");
 
-    if (!props.smusDomainId) {
+    // DynamoDB metadata store (no DataZone) — undefined on SMUS.
+    const metadataStoreTable = importMetadataStoreTable(this);
+    if (!metadataStoreTable && !props.smusDomainId) {
       throw new Error(
         "OntologyStack requires smusDomainId — DataZone permissions cannot be granted without a domain scope.",
       );
@@ -236,6 +251,7 @@ export class OntologyStack extends SCLStack {
       containerImage = ecs.ContainerImage.fromAsset(Paths.root, {
         file: "packages/ontology-engine/Dockerfile",
         platform: cdk.aws_ecr_assets.Platform.LINUX_AMD64,
+        buildArgs: imageBuildArgs(this),
       });
     }
 
@@ -268,7 +284,9 @@ export class OntologyStack extends SCLStack {
         // and applies content filtering to LLM calls (constraint inference).
         GUARDRAIL_SSM_PARAM: `${ssmPrefix}/bedrock/guardrail-id`,
         CATALOG_SOURCE: "smus",
-        SMUS_DOMAIN_ID: props.smusDomainId,
+        ...(props.smusDomainId && { SMUS_DOMAIN_ID: props.smusDomainId }),
+        ...metadataStoreEnv(metadataStoreTable),
+        ...llmProviderEnv(this),
         NAMESPACES_TABLE: namespacesTableName,
         DATASOURCES_TABLE: sourcesTableName,
         SOURCES_TABLE: sourcesTableName,
@@ -322,47 +340,58 @@ export class OntologyStack extends SCLStack {
       }),
     );
 
-    // OpenSearch Serverless — API access
-    taskDef.taskRole.addToPrincipalPolicy(
-      new iam.PolicyStatement({
-        actions: ["aoss:APIAccessAll"],
-        resources: [opensearchCollectionArn],
-      }),
-    );
+    // vector_store=opensearch: a managed domain needs only the IAM grant.
+    const aossVectorStore = resolveVectorStore(this) === "aoss";
+    let ossDataAccessPolicy: opensearchserverless.CfnAccessPolicy | undefined;
+    if (aossVectorStore) {
+      // OpenSearch Serverless — API access
+      taskDef.taskRole.addToPrincipalPolicy(
+        new iam.PolicyStatement({
+          actions: ["aoss:APIAccessAll"],
+          resources: [opensearchCollectionArn],
+        }),
+      );
 
-    // AOSS Data Access Policy — full CRUD for embeddings
-    const ossDataAccessPolicy = new opensearchserverless.CfnAccessPolicy(
-      this,
-      "OSSDataAccessPolicy",
-      {
-        name: this.prefixed("ontology-oss"),
-        type: "data",
-        policy: JSON.stringify([
-          {
-            Rules: [
-              {
-                ResourceType: "index",
-                Resource: [`index/${opensearchCollectionName}/*`],
-                Permission: [
-                  "aoss:CreateIndex",
-                  "aoss:DescribeIndex",
-                  "aoss:UpdateIndex",
-                  "aoss:DeleteIndex",
-                  "aoss:ReadDocument",
-                  "aoss:WriteDocument",
-                ],
-              },
-              {
-                ResourceType: "collection",
-                Resource: [`collection/${opensearchCollectionName}`],
-                Permission: ["aoss:DescribeCollectionItems"],
-              },
-            ],
-            Principal: [taskDef.taskRole.roleArn],
-          },
-        ]),
-      },
-    );
+      // AOSS Data Access Policy — full CRUD for embeddings
+      ossDataAccessPolicy = new opensearchserverless.CfnAccessPolicy(
+        this,
+        "OSSDataAccessPolicy",
+        {
+          name: this.prefixed("ontology-oss"),
+          type: "data",
+          policy: JSON.stringify([
+            {
+              Rules: [
+                {
+                  ResourceType: "index",
+                  Resource: [`index/${opensearchCollectionName}/*`],
+                  Permission: [
+                    "aoss:CreateIndex",
+                    "aoss:DescribeIndex",
+                    "aoss:UpdateIndex",
+                    "aoss:DeleteIndex",
+                    "aoss:ReadDocument",
+                    "aoss:WriteDocument",
+                  ],
+                },
+                {
+                  ResourceType: "collection",
+                  Resource: [`collection/${opensearchCollectionName}`],
+                  Permission: ["aoss:DescribeCollectionItems"],
+                },
+              ],
+              Principal: [taskDef.taskRole.roleArn],
+            },
+          ]),
+        },
+      );
+    } else {
+      grantVectorStoreDomain(
+        this,
+        taskDef.taskRole,
+        VECTOR_STORE_WRITE_ACTIONS,
+      );
+    }
 
     // DynamoDB — full access to own table
     this.table.grantReadWriteData(taskDef.taskRole);
@@ -393,6 +422,7 @@ export class OntologyStack extends SCLStack {
     // Bedrock — LLM (Converse) + Embeddings (InvokeModel)
     const region = cdk.Aws.REGION;
     const account = cdk.Aws.ACCOUNT_ID;
+    const partition = cdk.Aws.PARTITION;
     taskDef.taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         actions: [
@@ -402,9 +432,9 @@ export class OntologyStack extends SCLStack {
           "bedrock:ApplyGuardrail",
         ],
         resources: [
-          `arn:aws:bedrock:*::foundation-model/*`,
-          `arn:aws:bedrock:*:${account}:inference-profile/*`,
-          `arn:aws:bedrock:${region}:${account}:guardrail/*`,
+          `arn:${partition}:bedrock:*::foundation-model/*`,
+          `arn:${partition}:bedrock:*:${account}:inference-profile/*`,
+          `arn:${partition}:bedrock:${region}:${account}:guardrail/*`,
         ],
       }),
     );
@@ -431,7 +461,7 @@ export class OntologyStack extends SCLStack {
       new iam.PolicyStatement({
         actions: ["ssm:GetParameter"],
         resources: [
-          `arn:aws:ssm:${region}:${account}:parameter${ssmPrefix}/bedrock/guardrail-id`,
+          `arn:${partition}:ssm:${region}:${account}:parameter${ssmPrefix}/bedrock/guardrail-id`,
         ],
       }),
     );
@@ -441,28 +471,33 @@ export class OntologyStack extends SCLStack {
     // 2. Project membership — granted by assuming ``projectAccessRole``,
     //    which is registered as a DataZone project member in NamespaceStack.
     //    DataZone gates Search/GetAsset on project membership, not IAM alone.
-    taskDef.taskRole.addToPrincipalPolicy(
-      new iam.PolicyStatement({
-        actions: [
-          "datazone:GetAsset",
-          "datazone:SearchAssets",
-          "datazone:Search",
-          "datazone:GetProject",
-        ],
-        resources: [
-          `arn:aws:datazone:${region}:${account}:domain/${props.smusDomainId}`,
-          `arn:aws:datazone:${region}:${account}:domain/${props.smusDomainId}/*`,
-        ],
-      }),
-    );
+    if (props.smusDomainId) {
+      taskDef.taskRole.addToPrincipalPolicy(
+        new iam.PolicyStatement({
+          actions: [
+            "datazone:GetAsset",
+            "datazone:SearchAssets",
+            "datazone:Search",
+            "datazone:GetProject",
+          ],
+          resources: [
+            `arn:${partition}:datazone:${region}:${account}:domain/${props.smusDomainId}`,
+            `arn:${partition}:datazone:${region}:${account}:domain/${props.smusDomainId}/*`,
+          ],
+        }),
+      );
+    }
     projectAccessRole.grantAssumeRole(taskDef.taskRole);
+    // DynamoDB metadata store — the catalog reader's stand-in for DataZone.
+    metadataStoreTable?.grantReadData(taskDef.taskRole);
+    grantLlmProviderSecret(this, taskDef.taskRole);
 
     // Sources Lambda — invoke for catalog column fetching during induction
     taskDef.taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         actions: ["lambda:InvokeFunction"],
         resources: [
-          `arn:aws:lambda:${region}:${account}:function:${this.prefixed("sources-api")}`,
+          `arn:${partition}:lambda:${region}:${account}:function:${this.prefixed("sources-api")}`,
         ],
       }),
     );
@@ -471,7 +506,9 @@ export class OntologyStack extends SCLStack {
     taskDef.taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         actions: ["events:PutEvents"],
-        resources: [`arn:aws:events:${region}:${account}:event-bus/default`],
+        resources: [
+          `arn:${partition}:events:${region}:${account}:event-bus/default`,
+        ],
       }),
     );
 
@@ -523,7 +560,9 @@ export class OntologyStack extends SCLStack {
     // OpenSearch — without this, the first /readiness or _ensure_index call
     // races against policy creation and can return 403 long enough to trip
     // the deployment circuit breaker.
-    this.service.node.addDependency(ossDataAccessPolicy);
+    if (ossDataAccessPolicy) {
+      this.service.node.addDependency(ossDataAccessPolicy);
+    }
 
     ecsSecurityGroup.addIngressRule(
       props.network.lambdaSecurityGroup,
@@ -1070,6 +1109,10 @@ export class OntologyStack extends SCLStack {
         NEPTUNE_ENDPOINT: props.neptuneClusterEndpoint,
         OPENSEARCH_ENDPOINT: opensearchEndpoint,
         ALLOWED_ORIGIN: props.allowedOrigin,
+        // Health check describes the managed domain by name (no AOSS id).
+        ...(!aossVectorStore && {
+          OPENSEARCH_DOMAIN_NAME: vectorStoreDomainName(this),
+        }),
       },
     });
     // System-health check describes only the sources table (SOURCES_TABLE).
@@ -1091,11 +1134,17 @@ export class OntologyStack extends SCLStack {
     // Reference), so it must use "*". It is a read-only control-plane call
     // returning collection metadata (status, endpoints), never index data.
     apiProxyFn.addToRolePolicy(
-      new iam.PolicyStatement({
-        sid: "HealthCheckBatchGetCollection",
-        actions: ["aoss:BatchGetCollection"],
-        resources: ["*"],
-      }),
+      aossVectorStore
+        ? new iam.PolicyStatement({
+            sid: "HealthCheckBatchGetCollection",
+            actions: ["aoss:BatchGetCollection"],
+            resources: ["*"],
+          })
+        : new iam.PolicyStatement({
+            sid: "HealthCheckDescribeDomain",
+            actions: ["es:DescribeDomain"],
+            resources: [vectorStoreDomainArn(this)],
+          }),
     );
 
     new ssm.StringParameter(this, "SsmOntologyApiFnArn", {

@@ -252,8 +252,8 @@ def _build_lexical_store(graph_arn: str, region: str, app_config: dict, namespac
     tenant_id = to_graphrag_tenant_id(namespace) if namespace else ""
 
     # Strict ARN validation — only accept canonical Neptune Analytics ARN format
-    _VALID_ARN_PREFIX = "arn:aws:neptune-graph:"
-    if graph_arn.startswith(_VALID_ARN_PREFIX):
+    _VALID_ARN_PREFIXES = ("arn:aws:neptune-graph:", "arn:aws-cn:neptune-graph:", "arn:aws-us-gov:neptune-graph:")
+    if graph_arn.startswith(_VALID_ARN_PREFIXES):
         graph_id = _parse_graph_id(graph_arn)
         return NeptuneAnalyticsLexicalStore(graph_id=graph_id, region=region)
 

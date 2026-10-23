@@ -32,6 +32,15 @@ import {
 } from "../../constants";
 import { bundlePython } from "../../utils/python-bundling";
 import { bedrockModelArn } from "../../utils/bedrock-utils";
+import {
+  grantLlmProviderSecret,
+  importMetadataStoreTable,
+  grantVectorStoreDomain,
+  llmProviderEnv,
+  metadataStoreEnv,
+  resolveVectorStore,
+  VECTOR_STORE_WRITE_ACTIONS,
+} from "../../utils/deployment-switches";
 
 export interface MetricServiceStackProps extends cdk.StackProps {
   /** VPC for Lambda placement. */
@@ -98,10 +107,15 @@ export class MetricServiceStack extends SCLStack {
       this,
       `${ssmPrefix}/namespace/namespaces-table-name`,
     );
-    const smusDomainId = ssm.StringParameter.valueForStringParameter(
-      this,
-      `${ssmPrefix}/smus/domain-id`,
-    );
+    // DynamoDB metadata store (no DataZone, so no /smus/domain-id) —
+    // undefined on SMUS.
+    const metadataStoreTable = importMetadataStoreTable(this);
+    const smusDomainId = metadataStoreTable
+      ? undefined
+      : ssm.StringParameter.valueForStringParameter(
+          this,
+          `${ssmPrefix}/smus/domain-id`,
+        );
     const projectAccessRoleArn = ssm.StringParameter.valueForStringParameter(
       this,
       `${ssmPrefix}/smus/dz-project-access-role-arn`,
@@ -175,8 +189,10 @@ export class MetricServiceStack extends SCLStack {
         // SMUS catalog access — metric validation Checks 2-5
         DATA_SOURCES_TABLE: sourcesTableName,
         NAMESPACES_TABLE: namespacesTableName,
-        SMUS_DOMAIN_ID: smusDomainId,
+        ...(smusDomainId && { SMUS_DOMAIN_ID: smusDomainId }),
         PROJECT_ACCESS_ROLE_ARN: projectAccessRoleArn,
+        ...metadataStoreEnv(metadataStoreTable),
+        ...llmProviderEnv(this),
       },
     });
 
@@ -201,12 +217,22 @@ export class MetricServiceStack extends SCLStack {
     );
 
     // ── IAM: OpenSearch Serverless ─────────────────────────────────
-    this.metricApiFn.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ["aoss:APIAccessAll"],
-        resources: [opensearchCollectionArn],
-      }),
-    );
+    // vector_store=opensearch: a managed domain needs only the IAM grant.
+    const aossVectorStore = resolveVectorStore(this) === "aoss";
+    if (aossVectorStore) {
+      this.metricApiFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ["aoss:APIAccessAll"],
+          resources: [opensearchCollectionArn],
+        }),
+      );
+    } else {
+      grantVectorStoreDomain(
+        this,
+        this.metricApiFn,
+        VECTOR_STORE_WRITE_ACTIONS,
+      );
+    }
 
     // ── IAM: Bedrock (embedding generation) ────────────────────────
     // The embed model is an inference profile (e.g. us.cohere.embed-v4:0) — grant
@@ -220,7 +246,7 @@ export class MetricServiceStack extends SCLStack {
           bedrockModelArn(bedrockModelId, "*", this.account),
           // Invoking an inference profile also requires permission on the
           // underlying foundation model it routes to, hence the wildcard.
-          `arn:aws:bedrock:*::foundation-model/*`,
+          `arn:${this.partition}:bedrock:*::foundation-model/*`,
         ],
       }),
     );
@@ -230,7 +256,7 @@ export class MetricServiceStack extends SCLStack {
       new iam.PolicyStatement({
         actions: ["events:PutEvents"],
         resources: [
-          `arn:aws:events:${this.region}:${this.account}:event-bus/${eventBusName}`,
+          `arn:${this.partition}:events:${this.region}:${this.account}:event-bus/${eventBusName}`,
         ],
       }),
     );
@@ -249,6 +275,8 @@ export class MetricServiceStack extends SCLStack {
       namespacesTableName,
     );
     namespacesTable.grantReadData(this.metricApiFn);
+    metadataStoreTable?.grantReadData(this.metricApiFn);
+    grantLlmProviderSecret(this, this.metricApiFn);
 
     this.metricApiFn.addToRolePolicy(
       new iam.PolicyStatement({
@@ -268,37 +296,39 @@ export class MetricServiceStack extends SCLStack {
     // ── AOSS Data Access Policy ───────────────────────────────────
     // OpenSearch Serverless requires a data access policy in addition
     // to IAM permissions. Without this, the role cannot read/write documents.
-    new opensearchserverless.CfnAccessPolicy(this, "OSSDataAccessPolicy", {
-      name: this.prefixed("metric-data-access"),
-      type: "data",
-      policy: JSON.stringify([
-        {
-          Rules: [
-            {
-              ResourceType: "index",
-              Resource: [`index/${opensearchCollectionName}/*`],
-              Permission: [
-                "aoss:CreateIndex",
-                "aoss:UpdateIndex",
-                "aoss:DescribeIndex",
-                "aoss:ReadDocument",
-                "aoss:WriteDocument",
-              ],
-            },
-            {
-              ResourceType: "collection",
-              Resource: [`collection/${opensearchCollectionName}`],
-              Permission: [
-                "aoss:CreateCollectionItems",
-                "aoss:DescribeCollectionItems",
-                "aoss:UpdateCollectionItems",
-              ],
-            },
-          ],
-          Principal: [this.metricApiFn.role!.roleArn],
-        },
-      ]),
-    });
+    if (aossVectorStore) {
+      new opensearchserverless.CfnAccessPolicy(this, "OSSDataAccessPolicy", {
+        name: this.prefixed("metric-data-access"),
+        type: "data",
+        policy: JSON.stringify([
+          {
+            Rules: [
+              {
+                ResourceType: "index",
+                Resource: [`index/${opensearchCollectionName}/*`],
+                Permission: [
+                  "aoss:CreateIndex",
+                  "aoss:UpdateIndex",
+                  "aoss:DescribeIndex",
+                  "aoss:ReadDocument",
+                  "aoss:WriteDocument",
+                ],
+              },
+              {
+                ResourceType: "collection",
+                Resource: [`collection/${opensearchCollectionName}`],
+                Permission: [
+                  "aoss:CreateCollectionItems",
+                  "aoss:DescribeCollectionItems",
+                  "aoss:UpdateCollectionItems",
+                ],
+              },
+            ],
+            Principal: [this.metricApiFn.role!.roleArn],
+          },
+        ]),
+      });
+    }
 
     // ── Publish Lambda ARN to SSM ──────────────────────────────────
     new ssm.StringParameter(this, "SsmMetricApiFnArn", {
@@ -370,8 +400,10 @@ export class MetricServiceStack extends SCLStack {
         // fallback and now fails the job (fail-closed).
         DATA_SOURCES_TABLE: sourcesTableName,
         NAMESPACES_TABLE: namespacesTableName,
-        SMUS_DOMAIN_ID: smusDomainId,
+        ...(smusDomainId && { SMUS_DOMAIN_ID: smusDomainId }),
         PROJECT_ACCESS_ROLE_ARN: projectAccessRoleArn,
+        ...metadataStoreEnv(metadataStoreTable),
+        ...llmProviderEnv(this),
       },
     });
 
@@ -436,6 +468,8 @@ export class MetricServiceStack extends SCLStack {
     // SMUS catalog access — same grants as the API Lambda
     sourcesTable.grantReadData(importWorkerFn);
     namespacesTable.grantReadData(importWorkerFn);
+    metadataStoreTable?.grantReadData(importWorkerFn);
+    grantLlmProviderSecret(this, importWorkerFn);
     importWorkerFn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ["sts:AssumeRole"],
@@ -455,12 +489,16 @@ export class MetricServiceStack extends SCLStack {
       }),
     );
 
-    importWorkerFn.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ["aoss:APIAccessAll"],
-        resources: [opensearchCollectionArn],
-      }),
-    );
+    if (aossVectorStore) {
+      importWorkerFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ["aoss:APIAccessAll"],
+          resources: [opensearchCollectionArn],
+        }),
+      );
+    } else {
+      grantVectorStoreDomain(this, importWorkerFn, VECTOR_STORE_WRITE_ACTIONS);
+    }
 
     importWorkerFn.addToRolePolicy(
       new iam.PolicyStatement({
@@ -469,7 +507,7 @@ export class MetricServiceStack extends SCLStack {
           bedrockModelArn(bedrockModelId, "*", this.account),
           // See the metric-api grant above: a profile also needs invoke on the
           // underlying foundation model.
-          `arn:aws:bedrock:*::foundation-model/*`,
+          `arn:${this.partition}:bedrock:*::foundation-model/*`,
         ],
       }),
     );

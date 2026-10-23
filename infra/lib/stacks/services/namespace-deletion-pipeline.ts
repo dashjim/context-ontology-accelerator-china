@@ -43,6 +43,11 @@ import * as opensearchserverless from "aws-cdk-lib/aws-opensearchserverless";
 import * as sfn from "aws-cdk-lib/aws-stepfunctions";
 import * as tasks from "aws-cdk-lib/aws-stepfunctions-tasks";
 import { Construct } from "constructs";
+import {
+  grantVectorStoreDomain,
+  metadataStoreEnv,
+  resolveVectorStore,
+} from "../../utils/deployment-switches";
 
 export interface NamespaceDeletionPipelineProps {
   /** Prefixed name helper from SCLStack. */
@@ -85,6 +90,11 @@ export interface NamespaceDeletionPipelineProps {
 
   readonly datazoneDomainId?: string;
   /**
+   * DynamoDB metadata store (`metadata_store_backend=dynamodb`), in place of
+   * the DataZone domain: DeletePlatform deletes the namespace's project there.
+   */
+  readonly metadataStoreTable?: dynamodb.ITable;
+  /**
    * ARN of namespaceApiFn's own execution role. DeletePlatform assumes
    * this role for datazone:DeleteProject — DataZone records the
    * CreateProject caller as the project's owner, and namespaceApiFn is
@@ -118,6 +128,7 @@ export class NamespaceDeletionPipeline extends Construct {
 
     const region = cdk.Stack.of(this).region;
     const account = cdk.Stack.of(this).account;
+    const partition = cdk.Stack.of(this).partition;
 
     const commonLambdaProps = {
       runtime: lambda.Runtime.PYTHON_3_12,
@@ -146,7 +157,7 @@ export class NamespaceDeletionPipeline extends Construct {
       new iam.PolicyStatement({
         actions: ["lambda:InvokeFunction"],
         resources: [
-          `arn:aws:lambda:${region}:${account}:function:${props.sourcesApiFnName}`,
+          `arn:${partition}:lambda:${region}:${account}:function:${props.sourcesApiFnName}`,
         ],
       }),
     );
@@ -157,11 +168,24 @@ export class NamespaceDeletionPipeline extends Construct {
     // than added to the sources stack's policy so this stays a single-stack
     // change with no cross-stack role-ARN dependency (AOSS permissions across
     // multiple data-access policies are additive).
-    if (props.opensearchCollectionName) {
+    if (
+      props.opensearchCollectionName &&
+      resolveVectorStore(this) === "opensearch"
+    ) {
+      // Managed domain: IAM alone, scoped to the same GraphRAG index names.
+      grantVectorStoreDomain(
+        this,
+        deleteSourcesFn,
+        ["es:ESHttpHead", "es:ESHttpGet", "es:ESHttpDelete"],
+        ["chunk_*", "topic_*", "statement_*"],
+      );
+    } else if (props.opensearchCollectionName) {
       deleteSourcesFn.addToRolePolicy(
         new iam.PolicyStatement({
           actions: ["aoss:APIAccessAll"],
-          resources: [`arn:aws:aoss:${region}:${account}:collection/*`],
+          resources: [
+            `arn:${partition}:aoss:${region}:${account}:collection/*`,
+          ],
         }),
       );
       new opensearchserverless.CfnAccessPolicy(
@@ -208,7 +232,7 @@ export class NamespaceDeletionPipeline extends Construct {
       new iam.PolicyStatement({
         actions: ["lambda:InvokeFunction"],
         resources: [
-          `arn:aws:lambda:${region}:${account}:function:${props.metricApiFnName}`,
+          `arn:${partition}:lambda:${region}:${account}:function:${props.metricApiFnName}`,
         ],
       }),
     );
@@ -236,8 +260,8 @@ export class NamespaceDeletionPipeline extends Construct {
         new iam.PolicyStatement({
           actions: ["s3:DeleteObject", "s3:ListBucket"],
           resources: [
-            `arn:aws:s3:::${props.ontologyBucketName}`,
-            `arn:aws:s3:::${props.ontologyBucketName}/ontologies/*`,
+            `arn:${partition}:s3:::${props.ontologyBucketName}`,
+            `arn:${partition}:s3:::${props.ontologyBucketName}/ontologies/*`,
           ],
         }),
       );
@@ -260,6 +284,7 @@ export class NamespaceDeletionPipeline extends Construct {
         ...(props.namespaceApiFnRoleArn && {
           PROJECT_ACCESS_ROLE_ARN: props.namespaceApiFnRoleArn,
         }),
+        ...metadataStoreEnv(props.metadataStoreTable),
         ...(props.vkgClusterArn && { VKG_CLUSTER_ARN: props.vkgClusterArn }),
         ...(props.cloudMapNamespaceId && {
           CLOUD_MAP_NAMESPACE_ID: props.cloudMapNamespaceId,
@@ -269,10 +294,11 @@ export class NamespaceDeletionPipeline extends Construct {
     this.deletePlatformFn = deletePlatformFn;
     props.resourceRoleMappingsTable.grantReadWriteData(deletePlatformFn);
     props.rolesTable.grantReadWriteData(deletePlatformFn);
+    props.metadataStoreTable?.grantReadWriteData(deletePlatformFn);
     deletePlatformFn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ["athena:DeleteWorkGroup", "athena:GetWorkGroup"],
-        resources: [`arn:aws:athena:${region}:${account}:workgroup/*`],
+        resources: [`arn:${partition}:athena:${region}:${account}:workgroup/*`],
       }),
     );
     if (props.namespaceApiFnRoleArn) {

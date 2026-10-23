@@ -38,6 +38,51 @@ function renderVkgWithContext(
   );
 }
 
+describe("VkgStack image build args", () => {
+  function vkgImageBuildArgs(
+    extraContext: Record<string, unknown>,
+  ): (Record<string, string> | undefined)[] {
+    const app = new cdk.App({ context: { ...TEST_CONTEXT, ...extraContext } });
+    const network = new NetworkStack(app, "ArgsNetwork");
+    const bucketStack = new cdk.Stack(app, "ArgsBucketStack");
+    const bucket = new s3.Bucket(bucketStack, "OntologyBucket", {
+      bucketName: `${PREFIX}-ontology-artifacts`,
+    });
+    new VkgStack(app, "ArgsVkg", {
+      network,
+      serviceNamespace: network.serviceNamespace,
+      ontologyBucket: bucket,
+    });
+    const manifest = app
+      .synth()
+      .artifacts.find(
+        (a): a is cdk.cx_api.AssetManifestArtifact =>
+          a instanceof cdk.cx_api.AssetManifestArtifact &&
+          a.id === "ArgsVkg.assets",
+      )!;
+    const images = Object.values(manifest.contents.dockerImages ?? {});
+    expect(images).toHaveLength(1);
+    return images.map((i) => i.source.dockerBuildArgs);
+  }
+
+  it("passes no build args by default", () => {
+    expect(vkgImageBuildArgs({})).toEqual([undefined]);
+  });
+
+  it("passes build_pip_index_url to the image build", () => {
+    expect(
+      vkgImageBuildArgs({
+        build_pip_index_url: "https://pypi.example.cn/simple",
+      }),
+    ).toEqual([
+      {
+        PIP_INDEX_URL: "https://pypi.example.cn/simple",
+        UV_DEFAULT_INDEX: "https://pypi.example.cn/simple",
+      },
+    ]);
+  });
+});
+
 describe("VkgStack", () => {
   let template: Template;
   let templateWithBucket: Template;
@@ -153,7 +198,10 @@ describe("VkgStack", () => {
       ContainerDefinitions: Match.arrayWith([
         Match.objectLike({
           Environment: Match.arrayWith([
-            Match.objectLike({ Name: "ONTOP_JAVA_ARGS", Value: "-Xmx1536m -Xms512m" }),
+            Match.objectLike({
+              Name: "ONTOP_JAVA_ARGS",
+              Value: "-Xmx1536m -Xms512m",
+            }),
           ]),
         }),
       ]),
@@ -207,7 +255,10 @@ describe("VkgStack", () => {
       ContainerDefinitions: Match.arrayWith([
         Match.objectLike({
           Environment: Match.arrayWith([
-            Match.objectLike({ Name: "ONTOP_JAVA_ARGS", Value: "-Xmx6144m -Xms2048m" }),
+            Match.objectLike({
+              Name: "ONTOP_JAVA_ARGS",
+              Value: "-Xmx6144m -Xms2048m",
+            }),
           ]),
         }),
       ]),
@@ -394,9 +445,9 @@ describe("VkgStack", () => {
   });
 
   test("synth fails fast on an invalid lambda_reserved_concurrency", () => {
-    expect(() => renderVkgWithContext({ lambda_reserved_concurrency: -1 })).toThrow(
-      /lambda_reserved_concurrency must be a non-negative integer/,
-    );
+    expect(() =>
+      renderVkgWithContext({ lambda_reserved_concurrency: -1 }),
+    ).toThrow(/lambda_reserved_concurrency must be a non-negative integer/);
     expect(() =>
       renderVkgWithContext({ lambda_reserved_concurrency: "abc" }),
     ).toThrow(/lambda_reserved_concurrency must be a non-negative integer/);
@@ -444,9 +495,7 @@ describe("VkgStack", () => {
     template.hasResourceProperties("AWS::Events::Rule", {
       Name: `${PREFIX}-vkg-reload-sweep`,
       ScheduleExpression: "rate(7 days)",
-      Targets: Match.arrayWith([
-        Match.objectLike({ Input: '{"sweep":true}' }),
-      ]),
+      Targets: Match.arrayWith([Match.objectLike({ Input: '{"sweep":true}' })]),
     });
   });
 

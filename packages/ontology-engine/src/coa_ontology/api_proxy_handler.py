@@ -19,7 +19,7 @@ from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 
-from coa_common import resolve_region
+from coa_common import opensearch_signing_service, resolve_region
 
 ENDPOINT = os.environ["ONTOLOGY_ENGINE_ENDPOINT"].rstrip("/")
 
@@ -159,9 +159,25 @@ def _handle_system_health() -> dict:
     else:
         results["neptuneKg"] = "not_configured"
 
-    # OpenSearch Serverless (AOSS)
+    # OpenSearch Serverless (AOSS), or a managed domain (vector_store=opensearch)
     opensearch_endpoint = os.environ.get("OPENSEARCH_ENDPOINT", "")
-    if opensearch_endpoint:
+    if opensearch_endpoint and opensearch_signing_service(opensearch_endpoint) == "es":
+        try:
+            status = boto3.client("opensearch", region_name=region).describe_domain(
+                DomainName=os.environ["OPENSEARCH_DOMAIN_NAME"]
+            )["DomainStatus"]
+            # A domain serves requests while Processing (config changes), so only
+            # creation/deletion makes it unavailable.
+            if status.get("Created") and not status.get("Deleted"):
+                results["opensearch"] = "ok"
+            else:
+                results["opensearch"] = "domain_status: deleted" if status.get("Deleted") else "domain_status: creating"
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).error("health_check_opensearch_failed", exc_info=True)
+            results["opensearch"] = "error"
+    elif opensearch_endpoint:
         try:
             client = boto3.client("opensearchserverless", region_name=region)
             host = opensearch_endpoint.replace("https://", "").split(".")[0]

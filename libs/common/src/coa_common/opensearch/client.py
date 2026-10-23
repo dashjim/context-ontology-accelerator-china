@@ -32,11 +32,10 @@ import boto3
 from opensearchpy import AWSV4SignerAuth, OpenSearch, RequestsHttpConnection
 from opensearchpy.exceptions import RequestError
 
+from coa_common.config import opensearch_signing_service
 from coa_common.opensearch.retry import bulk_with_retry, oss_retry
 
 log = logging.getLogger(__name__)
-
-_AOSS_SERVICE = "aoss"  # OpenSearch Serverless — NOT "es"
 
 # ``delete_by_term`` re-verifies to zero against AOSS's eventually-consistent
 # search (search lags the index, so an empty *search* page is NOT proof the
@@ -230,8 +229,9 @@ def _build_signed_client(endpoint: str, region: str, timeout: int) -> OpenSearch
         raise RuntimeError("AWS credentials not available")
     # LIVE credentials object (not a frozen snapshot): AWSV4SignerAuth re-signs
     # each request with current creds, so a cached client survives Fargate
-    # task-role token rotation. Service must be "aoss" (defaults to "es").
-    auth = AWSV4SignerAuth(credentials, region, _AOSS_SERVICE)
+    # task-role token rotation. Service is "aoss" for a Serverless collection,
+    # "es" for a managed domain (vector_store=opensearch), picked from the host.
+    auth = AWSV4SignerAuth(credentials, region, opensearch_signing_service(host))
     return OpenSearch(
         hosts=[{"host": host, "port": 443}],
         http_auth=auth,
@@ -263,8 +263,10 @@ class AossVectorClient:
     """Shared AOSS vector client. See the module docstring.
 
     Args:
-        endpoint: AOSS collection endpoint (``https://…aoss.<region>.on.aws``).
-            Required for the direct transport; ignored for the proxy transport.
+        endpoint: AOSS collection endpoint (``https://…aoss.<region>.on.aws``),
+            or a managed OpenSearch domain endpoint (``https://vpc-….es.amazonaws.com[.cn]``,
+            signed for ``es``). Required for the direct transport; ignored for
+            the proxy transport.
         region: AWS region for SigV4 signing (direct transport).
         dimensions: knn_vector dimension for ``build_index_mapping``.
         timeout: opensearch-py request timeout (seconds), direct transport.

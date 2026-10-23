@@ -8,6 +8,7 @@ import {
   RESERVED_DATASOURCE_ROLE_SEGMENT,
   ReservedRoleNamePrefix,
 } from "../aspects/reserved-role-prefix";
+import { isChinaRegion } from "../utils/deployment-switches";
 
 /**
  * Base stack for all SemanticContext CloudFormation stacks.
@@ -39,12 +40,21 @@ import {
 export class SCLStack extends cdk.Stack {
   public readonly envName: string;
 
+  /**
+   * Lambda event source mappings in AWS China reject tags ("Tags not
+   * supported in request"), so the stack-wide tags skip them there.
+   */
+  private readonly tagProps: cdk.TagProps;
+
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
+    this.tagProps = isChinaRegion(this)
+      ? { excludeResourceTypes: ["AWS::Lambda::EventSourceMapping"] }
+      : {};
     const { envName, projectTag } = resolveContext(this.node);
-    cdk.Tags.of(this).add("Project", projectTag);
-    cdk.Tags.of(this).add("Environment", envName);
+    cdk.Tags.of(this).add("Project", projectTag, this.tagProps);
+    cdk.Tags.of(this).add("Environment", envName, this.tagProps);
 
     this.envName = envName;
 
@@ -66,6 +76,6 @@ export class SCLStack extends cdk.Stack {
 
   /** Add a `Component` tag to this stack and all its children. */
   protected addComponentTag(component: string): void {
-    cdk.Tags.of(this).add("Component", component);
+    cdk.Tags.of(this).add("Component", component, this.tagProps);
   }
 }

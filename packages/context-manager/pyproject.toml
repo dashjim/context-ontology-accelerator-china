@@ -16,7 +16,7 @@ dependencies = [
     "structlog>=24.0",
     "pydantic>=2.13.4",
     "PyJWT>=2.13.0",
-    "strands-agents>=1.19.0",
+    "strands-agents[openai]>=1.19.0",
     "opensearch-py>=2.5",
     "requests-aws4auth>=1.3",
     "sqlalchemy[asyncio]>=2.0",
@@ -42,6 +42,9 @@ dependencies = [
     # it the toolkit raises ImportError ("opensearch-py and/or
     # llama-index-vector-stores-opensearch packages not found") at engine-build time.
     "llama-index-vector-stores-opensearch>=0.5",
+    # OpenAI-compatible LlamaIndex LLM for graphrag's response LLM when
+    # LLM_PROVIDER=openai_compatible (regions without Bedrock). Imported lazily.
+    "llama-index-llms-openai-like>=0.5",
     "retryhttp>=1.4.0",
 ]
 

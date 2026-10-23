@@ -944,7 +944,7 @@ class TestProtectedColumnMetadata:
 class TestWriteEnrichedAssets:
     """Verify _write_enriched_assets logic."""
 
-    @patch("coa_common.metadata_store.SMUSClient")
+    @patch("coa_common.metadata_store.build_metadata_store_client")
     def test_writes_enriched_tables(self, mock_smus_cls: MagicMock) -> None:
         mock_client = MagicMock()
         mock_smus_cls.return_value = mock_client
@@ -960,7 +960,7 @@ class TestWriteEnrichedAssets:
 
         mock_client.create_asset_revision.assert_called_once()
 
-    @patch("coa_common.metadata_store.SMUSClient")
+    @patch("coa_common.metadata_store.build_metadata_store_client")
     def test_skips_table_with_empty_data_source_id(self, mock_smus_cls: MagicMock) -> None:
         mock_client = MagicMock()
         mock_smus_cls.return_value = mock_client
@@ -971,7 +971,7 @@ class TestWriteEnrichedAssets:
 
         mock_client.search_assets.assert_not_called()
 
-    @patch("coa_common.metadata_store.SMUSClient")
+    @patch("coa_common.metadata_store.build_metadata_store_client")
     def test_skips_when_asset_not_found(self, mock_smus_cls: MagicMock) -> None:
         mock_client = MagicMock()
         mock_smus_cls.return_value = mock_client
@@ -985,7 +985,7 @@ class TestWriteEnrichedAssets:
 
         mock_client.create_asset_revision.assert_not_called()
 
-    @patch("coa_common.metadata_store.SMUSClient")
+    @patch("coa_common.metadata_store.build_metadata_store_client")
     def test_handles_write_exception_gracefully(self, mock_smus_cls: MagicMock) -> None:
         mock_client = MagicMock()
         mock_smus_cls.return_value = mock_client

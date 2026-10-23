@@ -23,7 +23,9 @@ from dataclasses import dataclass
 import graphrag_toolkit.lexical_graph.config as _graphrag_cfg
 import structlog
 from coa_common import make_llama_index_embedding, resolve_region
+from coa_common.bedrock_access import map_bedrock_model_id, prepare_bedrock_client
 from coa_common.constants import DEFAULT_EMBED_DIMENSIONS, DEFAULT_EMBED_MODEL_ID
+from coa_common.llm_provider import is_openai_compatible
 
 from ..step_ids import StepId
 from ..tier3.graph_traverser import GraphEntity
@@ -281,6 +283,28 @@ class BaselineLexicalRetriever:
             region=resolve_region(),
         )
         GraphRAGConfig.embed_dimensions = DEFAULT_EMBED_DIMENSIONS
+        if is_openai_compatible():
+            from coa_common.openai_compat import make_llama_index_llm
+
+            # The toolkit builds BedrockConverse for a model STRING, so hand it an
+            # instance — same model lookup and settings as its own string path.
+            GraphRAGConfig.response_llm = make_llama_index_llm(
+                os.environ.get("RESPONSE_MODEL", _ACTIVE_MODEL), temperature=0.0, max_tokens=4096
+            )
+        else:
+            response_model = os.environ.get("RESPONSE_MODEL", _ACTIVE_MODEL)
+            llm_model = map_bedrock_model_id(response_model)
+            llm_region = prepare_bedrock_client(GraphRAGConfig.aws_region)
+            if llm_model != response_model or llm_region != GraphRAGConfig.aws_region:
+                from llama_index.llms.bedrock_converse import BedrockConverse
+
+                # The toolkit builds a string model in GraphRAGConfig.aws_region, which
+                # must stay the deployment region (it also signs OpenSearch/Neptune), so
+                # a remapped or cross-region Bedrock LLM is handed over as an instance —
+                # with the settings of the toolkit's own string path.
+                GraphRAGConfig.response_llm = BedrockConverse(
+                    model=llm_model, temperature=0.0, max_tokens=4096, region_name=llm_region, max_retries=50
+                )
 
         logger.info(
             "baseline_lexical_retriever_init",
@@ -320,6 +344,7 @@ class BaselineLexicalRetriever:
         if key in self._engines:
             return self._engines[key]
 
+        from coa_common.opensearch import patch_graphrag_signing_service
         from graphrag_toolkit.lexical_graph.storage import GraphStoreFactory, VectorStoreFactory
 
         from .graphrag_patches import patch_paginated_search_source
@@ -327,6 +352,8 @@ class BaselineLexicalRetriever:
         # Must run before any index is queried: AOSS NEXTGEN omits knn_vector from the
         # default _source, which silently collapses the TopicBeamSearch beam.
         patch_paginated_search_source()
+        # graphrag signs for "aoss" only; a managed domain (vector_store=opensearch) needs "es".
+        patch_graphrag_signing_service(self._vector_store_uri.removeprefix("aoss://"))
 
         graph_store = GraphStoreFactory.for_graph_store(self._graph_store_uri)
         # Open the topic index too, not just the toolkit default ['chunk','statement'].

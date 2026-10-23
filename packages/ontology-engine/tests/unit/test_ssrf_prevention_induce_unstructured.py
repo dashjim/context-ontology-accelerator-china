@@ -46,6 +46,17 @@ class TestGraphArnValidation:
         )
         assert request.graph_arn == "arn:aws:neptune-graph:us-east-1:123456789012:graph/g-abc123xyz"
 
+    @pytest.mark.parametrize(("partition", "region"), [("aws-cn", "cn-north-1"), ("aws-us-gov", "us-gov-west-1")])
+    def test_non_commercial_partition_arn_accepted(self, partition, region):
+        """Neptune Analytics ARNs in the China and GovCloud partitions pass validation."""
+        arn = f"arn:{partition}:neptune-graph:{region}:123456789012:graph/g-abc123xyz"
+        request = UnstructuredInductionRequest(
+            name="test",
+            graph_arn=arn,
+            ontology_uri_prefix="http://example.com/ontology/test",
+        )
+        assert request.graph_arn == arn
+
     def test_neptune_db_sentinel_accepted(self):
         """The literal string 'neptune-db' is accepted as a sentinel value."""
         request = UnstructuredInductionRequest(
@@ -129,6 +140,19 @@ class TestBuildLexicalStoreSSRFPrevention:
             # NeptuneAnalyticsLexicalStore was constructed
             mock_na.assert_called_once_with(graph_id="g-test", region="us-west-2")
             # NeptuneDatabaseLexicalStore was NOT constructed
+            mock_ndb.assert_not_called()
+
+    def test_china_partition_arn_creates_na_store(self):
+        """A Neptune Analytics ARN in the aws-cn partition also creates a NeptuneAnalyticsLexicalStore."""
+        graph_arn = "arn:aws-cn:neptune-graph:cn-north-1:123456789012:graph/g-test"
+
+        with (
+            patch("coa_ontology.inducer.routers.induce_unstructured.NeptuneAnalyticsLexicalStore") as mock_na,
+            patch("coa_ontology.inducer.routers.induce_unstructured.NeptuneDatabaseLexicalStore") as mock_ndb,
+        ):
+            _build_lexical_store(graph_arn, "cn-north-1", {})
+
+            mock_na.assert_called_once_with(graph_id="g-test", region="cn-north-1")
             mock_ndb.assert_not_called()
 
     def test_neptune_db_sentinel_uses_server_config_endpoint(self):

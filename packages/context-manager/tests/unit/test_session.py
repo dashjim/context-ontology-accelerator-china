@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from coa_serve.session import SessionManager
+from structlog.testing import capture_logs
 
 
 @pytest.fixture
@@ -97,3 +98,45 @@ class TestAppendTurn:
         assert len(messages) == 2
         assert messages[0].text == "What is X?"
         assert messages[1].text == "X is Y."
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+class TestMemoryDisabled:
+    """No Memory id (no AgentCore Memory in the region): history off, sessions on."""
+
+    @pytest.fixture
+    def disabled(self):
+        with patch("coa_serve.session.MemorySessionManager") as MockMSM:
+            yield SessionManager(memory_id="", region="cn-north-1"), MockMSM
+
+    async def test_no_memory_client_and_single_log_line(self):
+        with patch("coa_serve.session.MemorySessionManager") as MockMSM, capture_logs() as logs:
+            sm = SessionManager(memory_id="")
+            await sm.create_or_resume("user-1", "ns-demo")
+            await sm.append_turn("user-1", "sess-1", "q", "a")
+
+        MockMSM.assert_not_called()
+        assert [e["event"] for e in logs if e["event"] == "conversation_history_disabled"] == [
+            "conversation_history_disabled"
+        ]
+
+    async def test_create_or_resume_returns_session_with_empty_history(self, disabled):
+        sm, _ = disabled
+        sid, history = await sm.create_or_resume("user-1", "ns-demo")
+        assert sid
+        assert history == []
+
+        resumed, history = await sm.create_or_resume("user-1", "ns-demo", session_id=sid)
+        assert resumed == sid
+        assert history == []
+
+    async def test_history_reads_are_empty(self, disabled):
+        sm, _ = disabled
+        assert await sm.get_rich_history("user-1", "sess-1") == []
+        assert await sm.get_rich_history_page("user-1", "sess-1") == ([], 0, False)
+
+    async def test_append_turn_is_skipped(self, disabled):
+        sm, MockMSM = disabled
+        await sm.append_turn("user-1", "sess-1", "What is X?", "X is Y.", result_metadata={"tier": 2})
+        MockMSM.return_value.create_memory_session.assert_not_called()

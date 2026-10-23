@@ -139,6 +139,17 @@ class TestGetS3Client:
         get_s3_client(role_arn="arn:aws:iam::123456789012:role/test-role")
         mock_sts.assume_role.assert_called_once()
 
+    @pytest.mark.parametrize("partition", ["aws-cn", "aws-us-gov"])
+    @patch("coa_common.s3.boto3")
+    def test_assume_role_accepts_other_partitions(self, mock_boto3, partition):
+        mock_sts = MagicMock()
+        mock_sts.assume_role.return_value = {
+            "Credentials": {"AccessKeyId": "AK", "SecretAccessKey": "SK", "SessionToken": "ST"}
+        }
+        mock_boto3.client.side_effect = [mock_sts, MagicMock()]
+        get_s3_client(role_arn=f"arn:{partition}:iam::123456789012:role/test-role")
+        mock_sts.assume_role.assert_called_once()
+
     def test_invalid_role_arn_raises(self):
         with pytest.raises(ValueError, match="Invalid IAM role ARN"):
             get_s3_client(role_arn="not-an-arn")

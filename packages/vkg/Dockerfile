@@ -10,6 +10,10 @@ ARG ONTOP_VERSION=5.5.0
 ARG ONTOP_SHA256=430dff312e68e8ad41d26e6113160ca2365c28c4fe911926193000a33299458f
 ARG H2_VERSION=2.2.224
 ARG H2_SHA256=b9d8f19358ada82a4f6eb5b174c6cfe320a375b5a9cb5a4fe456d623e6e55497
+# Optional PyPI mirror for builds on hosts where pypi.org is slow (e.g. AWS
+# China), passed by CDK from the build_pip_index_url context key. The default is
+# pip's own; the build arg reaches pip as an environment variable only.
+ARG PIP_INDEX_URL=https://pypi.org/simple
 
 # Install dependencies and Ontop CLI
 COPY requirements.txt /tmp/requirements.txt

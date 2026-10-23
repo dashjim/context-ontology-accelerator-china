@@ -29,7 +29,7 @@ from dataclasses import dataclass
 import boto3
 import structlog
 from botocore.exceptions import BotoCoreError, ClientError
-from coa_common import resolve_region
+from coa_common import aws_partition, resolve_region
 from coa_common.aws_config import sync_boto_config
 from coa_common.constants import datasource_external_id, require_resource_prefix
 from pydantic import BaseModel, ConfigDict, Field
@@ -48,7 +48,7 @@ CONNECTOR_ARN_SSM_PARAM = os.environ.get("DATABRICKS_CONNECTOR_ARN_SSM_PARAM", "
 CONFIG_SSM_PREFIX = os.environ.get("DATABRICKS_CONFIG_SSM_PREFIX", "")
 
 # Reserved role-name prefix COA's `sts:AssumeRole` grant is scoped to (sid
-# `AssumeRoleCoaManaged`, `arn:aws:iam::*:role/{RESOURCE_PREFIX}datasource-access-*`).
+# `AssumeRoleCoaManaged`, `arn:<partition>:iam::*:role/{RESOURCE_PREFIX}datasource-access-*`).
 _ROLE_NAME_INFIX = "datasource-access-"
 
 # Failures that are AWS's problem rather than a statement about the customer's wiring.
@@ -199,19 +199,25 @@ def secret_arn_is_connector_readable(secret_arn: str) -> bool:
 # `…:role/coa-dev-datasource-access-a/x;y/name` clears registration and then fails every
 # query on the connector's re-validation.
 #
-# The PARTITION, pinned to `aws`, because this platform's own assume grant is written
-# `arn:aws:iam::*:role/{RESOURCE_PREFIX}datasource-access-*`. A partition-agnostic pattern
-# accepts an `aws-cn` or `aws-us-gov` role, registration succeeds, and every assume is then
-# denied by our own policy with an AccessDenied whose message points the customer at their
-# principal and their ExternalId condition — both of which are correct. Refused at submit
-# instead, with the partition named. The Java side stays partition-agnostic: registration is
-# the only writer of these values, so it is the place the refusal belongs.
-_CONNECTOR_ROLE_ARN = re.compile(r"^arn:aws:iam::\d{12}:role/[A-Za-z0-9+=,.@_/-]+$")
+# The PARTITION, pinned to the deployment's own, because this platform's assume grant is
+# written `arn:<deployment partition>:iam::*:role/{RESOURCE_PREFIX}datasource-access-*`. A
+# partition-agnostic pattern accepts a role in another partition, registration succeeds, and
+# every assume is then denied by our own policy with an AccessDenied whose message points the
+# customer at their principal and their ExternalId condition — both of which are correct.
+# Refused at submit instead, with the partition named. The Java side stays partition-agnostic:
+# registration is the only writer of these values, so it is the place the refusal belongs.
+_CONNECTOR_ROLE_ARN = re.compile(r"^arn:(aws|aws-cn|aws-us-gov):iam::\d{12}:role/[A-Za-z0-9+=,.@_/-]+$")
+
+
+def deployment_partition() -> str:
+    """The ARN partition this deployment's assume grant is written in."""
+    return aws_partition(AWS_REGION)
 
 
 def role_arn_is_connector_assumable(role_arn: str) -> bool:
-    """Whether the connector's own role-ARN pattern accepts ``role_arn``."""
-    return bool(_CONNECTOR_ROLE_ARN.fullmatch(role_arn))
+    """Whether the connector's own role-ARN pattern accepts ``role_arn`` in this deployment's partition."""
+    match = _CONNECTOR_ROLE_ARN.fullmatch(role_arn)
+    return match is not None and match.group(1) == deployment_partition()
 
 
 class DatabricksConnectorConfig(BaseModel):
